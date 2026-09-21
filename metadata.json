@@ -1,0 +1,7 @@
+{
+  "name": "Telegram Shop Bot & Control Center",
+  "description": "Полнофункциональный Telegram-бот магазина цифровых товаров на Telegraf и better-sqlite3 с собственными товарами, авто- и ручной выдачей, приемом чеков и админ-панелью.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
