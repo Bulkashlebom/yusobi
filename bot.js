@@ -27,29 +27,37 @@
 import http from 'http';
 
 // 1. В САМОМ ВЕРХУ bot.js:
-// Сначала поднимаем HTTP-сервер, чтобы Cloud Run моментально получил 200 OK на Health Check и не убивал контейнер по таймауту
+// Если bot.js запускается НАПРЯМУЮ как отдельный процесс (например, standalone на Railway или отдельном инстансе),
+// поднимаем HTTP-сервер для прохождения Health Check.
+// Если же bot.js импортируется в server.ts (Express), порт 3000 занимает основной Express веб-сервер.
+const isDirectRun = Boolean(
+  process.argv[1] && (process.argv[1].endsWith('bot.js') || process.argv[1].endsWith('bot.ts'))
+);
+
 const PORT = process.env.PORT || 3000;
 let healthServer = null;
 
-try {
-  healthServer = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', uptime: process.uptime(), time: new Date().toISOString() }));
-  });
+if (isDirectRun) {
+  try {
+    healthServer = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', uptime: process.uptime(), time: new Date().toISOString() }));
+    });
 
-  healthServer.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Cloud Run] Health server listening on 0.0.0.0:${PORT}`);
-  });
+    healthServer.on('error', (err) => {
+      if (err && err.code === 'EADDRINUSE') {
+        console.log(`[HTTP NOTE] Порт ${PORT} уже слушается другим процессом.`);
+      } else {
+        console.error('[HTTP ERROR]:', err?.message || err);
+      }
+    });
 
-  healthServer.on('error', (err) => {
-    if (err.code === 'EADDRINUSE') {
-      console.log(`[HTTP NOTE] Порт ${PORT} уже слушается внешним сервером.`);
-    } else {
-      console.error('[HTTP ERROR]:', err.message);
-    }
-  });
-} catch (httpErr) {
-  console.error('[HTTP INIT ERROR]:', httpErr.message);
+    healthServer.listen(PORT, '0.0.0.0', () => {
+      console.log(`[Standalone Bot] Health server listening on 0.0.0.0:${PORT}`);
+    });
+  } catch (httpErr) {
+    console.error('[HTTP INIT ERROR]:', httpErr.message);
+  }
 }
 
 import { Telegraf, Markup, session } from 'telegraf';
@@ -4751,6 +4759,10 @@ bot.catch(async (err, ctx) => {
 
 // Глобальная защита процесса от падения (Node.js Process Protections)
 process.on('uncaughtException', (err) => {
+  if (err && err.code === 'EADDRINUSE') {
+    console.warn('[PROCESS WARNING] Порт уже занят (EADDRINUSE). Работа продолжается.');
+    return;
+  }
   console.error('[CRITICAL PROCESS ERROR] uncaughtException (перехвачено):', err);
   try {
     const adminIds = getAdminIds();
