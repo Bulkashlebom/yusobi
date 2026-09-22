@@ -2929,11 +2929,10 @@ bot.action('admin_products_list', async (ctx) => {
   await safeEditMessage(ctx, text, Markup.inlineKeyboard(buttons));
 });
 
-bot.action(/^admin_manage_prod_(\d+)$/, async (ctx) => {
-  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Доступ запрещен', { show_alert: true });
-  await ctx.answerCbQuery();
-
-  const productId = Number(ctx.match[1]);
+/**
+ * Отрисовка карточки управления товаром в админ-панели
+ */
+export async function renderProductManagementCard(ctx, productId) {
   const product = db.getProductById(productId);
 
   if (!product) {
@@ -3061,6 +3060,14 @@ bot.action(/^admin_manage_prod_(\d+)$/, async (ctx) => {
   ]);
 
   await safeEditMessage(ctx, cardText, keyboard);
+}
+
+bot.action(/^admin_manage_prod_(\d+)$/, async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Доступ запрещен', { show_alert: true });
+  await ctx.answerCbQuery().catch(() => {});
+
+  const productId = Number(ctx.match[1]);
+  await renderProductManagementCard(ctx, productId);
 });
 
 // Редактирование названия
@@ -3204,58 +3211,50 @@ bot.action(/^admin_set_fee_type_(\d+)_(PERCENT|FIXED)$/, async (ctx) => {
 // Переключение разрешения копеек (allow_decimals) в 1 клик
 bot.action(/^admin_toggle_decimals_(\d+)$/, async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Доступ запрещен', { show_alert: true });
+  await ctx.answerCbQuery().catch(() => {});
   const productId = Number(ctx.match[1]);
   const product = db.getProductById(productId);
 
-  if (!product) return ctx.answerCbQuery('Товар не найден', { show_alert: true });
+  if (!product) return;
 
   const newFlag = product.allow_decimals ? 0 : 1;
   db.updateProductAllowDecimals(productId, newFlag);
 
-  await ctx.answerCbQuery(newFlag ? 'Разрешены копейки' : 'Только целые числа');
-
-  ctx.match = [, String(productId)];
-  await bot.handleUpdate(ctx.update);
+  await renderProductManagementCard(ctx, productId);
 });
 
 // Переключение типа доставки (AUTO <-> MANUAL)
 bot.action(/^admin_toggle_type_(\d+)$/, async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Доступ запрещен', { show_alert: true });
+  await ctx.answerCbQuery().catch(() => {});
   const productId = Number(ctx.match[1]);
 
-  const updated = db.toggleProductDeliveryType(productId);
-  await ctx.answerCbQuery(`Тип доставки изменен на ${updated.delivery_type}!`);
-
-  ctx.match = [, String(productId)];
-  await bot.handleUpdate(ctx.update);
+  db.toggleProductDeliveryType(productId);
+  await renderProductManagementCard(ctx, productId);
 });
 
 // Переключение проверки наличия перед оплатой (ВКЛ / ВЫКЛ)
 bot.action(/^admin_toggle_req_check_(\d+)$/, async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Доступ запрещен', { show_alert: true });
+  await ctx.answerCbQuery().catch(() => {});
   const productId = Number(ctx.match[1]);
 
-  const updated = db.toggleProductRequiresAvailabilityCheck(productId);
-  await ctx.answerCbQuery(
-    updated?.requires_availability_check
-      ? '🔍 Проверка наличия включена'
-      : '⚪ Проверка наличия выключена'
-  );
-
-  ctx.match = [, String(productId)];
-  await bot.handleUpdate(ctx.update);
+  db.toggleProductRequiresAvailabilityCheck(productId);
+  await renderProductManagementCard(ctx, productId);
 });
 
 // Переключение видимости (Скрыть / Показать)
 bot.action(/^admin_toggle_hide_(\d+)$/, async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Доступ запрещен', { show_alert: true });
+  // Сразу гасим лоадер на инлайн-кнопке Telegram, чтобы интерфейс не зависал
+  await ctx.answerCbQuery().catch(() => {});
   const productId = Number(ctx.match[1]);
 
-  const updated = db.toggleProductVisibility(productId);
-  await ctx.answerCbQuery(updated.is_hidden ? 'Лот скрыт с витрины' : 'Лот опубликован на витрине!');
+  // Обновляем статус видимости в БД
+  db.toggleProductVisibility(productId);
 
-  ctx.match = [, String(productId)];
-  await bot.handleUpdate(ctx.update);
+  // Мгновенно перерисовываем карточку товара с обновленным статусом и кнопками
+  await renderProductManagementCard(ctx, productId);
 });
 
 // Пополнение ключей / наличия
