@@ -315,9 +315,11 @@ bot.start(async (ctx) => {
     console.error('[DB REGISTER ERROR]:', err);
   }
 
+  // Всегда сбрасываем текущий пошаговый визард и черновики при /start
   if (ctx.session) {
     ctx.session.draftOrder = null;
     ctx.session.step = null;
+    ctx.session.newProduct = null;
   }
   userStates.delete(userId);
 
@@ -330,6 +332,16 @@ bot.start(async (ctx) => {
     `Выберите раздел в меню ниже 👇`;
 
   await safeSendMessage(ctx.telegram, userId, welcomeText, getMainMenuKeyboard(userId));
+});
+
+// Команда аварийного сброса /cancel и обнуление FSM/сессий
+bot.command('cancel', async (ctx) => {
+  const userId = ctx.from.id;
+  if (ctx.session) {
+    ctx.session = {};
+  }
+  userStates.delete(userId);
+  await ctx.reply('Действие отменено. Главное меню:', getMainMenuKeyboard(userId));
 });
 
 // Команда /help — прямая поддержка и ответы на частые вопросы
@@ -3866,35 +3878,47 @@ bot.on('text', async (ctx) => {
   const state = userStates.get(userId);
   const text = ctx.message.text.trim();
 
-  // 0. Текстовое сообщение для массовой рассылки администратором
-  if (state?.type === 'ADMIN_BROADCAST_AWAIT_MESSAGE' && isAdmin(userId)) {
-    if (!text || text.length < 2) {
-      return ctx.reply('⚠️ Сообщение для рассылки должно содержать хотя бы 2 символа.');
+  // Глобальный перехват команды отмены или кнопки "❌ Отмена"
+  if (text === '/cancel' || text.toLowerCase() === 'отмена' || text === '❌ Отмена') {
+    if (ctx.session) {
+      ctx.session.step = null;
+      ctx.session.draftOrder = null;
+      ctx.session.newProduct = null;
     }
-
-    userStates.set(userId, {
-      type: 'ADMIN_BROADCAST_CONFIRM',
-      broadcastMessage: text,
-      photoFileId: null,
-    });
-
-    const previewMsg =
-      `👁 <b>ПРЕДПРОСМОТР РАССЫЛКИ:</b>\n\n` +
-      text + '\n\n' +
-      `<i>Кнопка «📦 Перейти в каталог» будет прикреплена автоматически к сообщению.</i>\n\n` +
-      `Отправить всем активным клиентам?`;
-
-    const keyboard = Markup.inlineKeyboard([
-      [Markup.button.callback('🚀 Запустить рассылку', 'admin_broadcast_confirm')],
-      [Markup.button.callback('❌ Отмена', 'admin_panel')],
-    ]);
-
-    return ctx.reply(previewMsg, {
-      parse_mode: 'HTML',
-      disable_web_page_preview: true,
-      ...keyboard,
-    });
+    userStates.delete(userId);
+    return ctx.reply('Действие отменено. Главное меню:', getMainMenuKeyboard(userId));
   }
+
+  try {
+    // 0. Текстовое сообщение для массовой рассылки администратором
+    if (state?.type === 'ADMIN_BROADCAST_AWAIT_MESSAGE' && isAdmin(userId)) {
+      if (!text || text.length < 2) {
+        return ctx.reply('⚠️ Сообщение для рассылки должно содержать хотя бы 2 символа.');
+      }
+
+      userStates.set(userId, {
+        type: 'ADMIN_BROADCAST_CONFIRM',
+        broadcastMessage: text,
+        photoFileId: null,
+      });
+
+      const previewMsg =
+        `👁 <b>ПРЕДПРОСМОТР РАССЫЛКИ:</b>\n\n` +
+        text + '\n\n' +
+        `<i>Кнопка «📦 Перейти в каталог» будет прикреплена автоматически к сообщению.</i>\n\n` +
+        `Отправить всем активным клиентам?`;
+
+      const keyboard = Markup.inlineKeyboard([
+        [Markup.button.callback('🚀 Запустить рассылку', 'admin_broadcast_confirm')],
+        [Markup.button.callback('❌ Отмена', 'admin_panel')],
+      ]);
+
+      return ctx.reply(previewMsg, {
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        ...keyboard,
+      });
+    }
 
   // 0. Поиск товаров по каталогу
   if (state?.type === 'USER_SEARCH_PRODUCTS') {
@@ -4213,7 +4237,9 @@ bot.on('text', async (ctx) => {
     }
 
     if (step === 'FLEX_FEE_VALUE') {
-      const feeNum = parseMoney(text, 0);
+      const rawInput = text.replace(',', '.').trim();
+      const parsedFee = parseFloat(rawInput);
+      const feeNum = (!isNaN(parsedFee) && parsedFee >= 0) ? parsedFee : 0;
       data.fee_value = feeNum;
       data.fee_percent = data.fee_type === 'PERCENT' ? feeNum : 0;
       data.fee_fixed = data.fee_type === 'FIXED' ? feeNum : 0;
@@ -4393,7 +4419,9 @@ bot.on('text', async (ctx) => {
 
   // 13. Админ редактирует комиссию (FLEXIBLE)
   if ((state?.type === 'ADMIN_EDIT_FEE_VALUE' || state?.type === 'ADMIN_EDIT_FEE_PERCENT') && isAdmin(userId)) {
-    const feeValue = parseMoney(text, 0);
+    const rawInput = text.replace(',', '.').trim();
+    const parsedFee = parseFloat(rawInput);
+    const feeValue = (!isNaN(parsedFee) && parsedFee >= 0) ? parsedFee : 0;
     const productId = state.productId;
     const feeType = state.feeType || 'PERCENT';
     userStates.delete(userId);
@@ -4683,8 +4711,16 @@ bot.on('text', async (ctx) => {
     }
   }
 
-  // Обычное сообщение
-  await ctx.reply('Используйте меню для навигации по магазину 👇', getMainMenuKeyboard(userId));
+    // Обычное сообщение
+    await ctx.reply('Используйте меню для навигации по магазину 👇', getMainMenuKeyboard(userId));
+  } catch (err) {
+    console.error(`[bot.on('text') ERROR for user ${userId}]:`, err);
+    try {
+      await ctx.reply('⚠️ Произошла непредвиденная ошибка при обработке ввода. Состояние сброшено. Введите /start или выберите действие в меню:', getMainMenuKeyboard(userId));
+    } catch (sendErr) {
+      // ignore
+    }
+  }
 });
 
 // ==========================================

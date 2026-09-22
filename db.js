@@ -113,18 +113,30 @@ export function formatMoney(val) {
 
 /**
  * Форматирование комиссии: "+2%" или "+1.02 ₽"
- * @param {'PERCENT'|'FIXED'} feeType 
- * @param {number} feeValue 
+ * Поддерживает вызов как formatFeeLabel(product), так и formatFeeLabel(feeType, feeValue)
+ * @param {'PERCENT'|'FIXED'|Object} feeTypeOrProduct 
+ * @param {number} [feeValue] 
  * @returns {string}
  */
-export function formatFeeLabel(feeType, feeValue) {
-  const type = feeType === 'FIXED' ? 'FIXED' : 'PERCENT';
-  const val = parseMoney(feeValue, 0);
+export function formatFeeLabel(feeTypeOrProduct, feeValue) {
+  let type = 'PERCENT';
+  let val = 0;
+
+  if (feeTypeOrProduct && typeof feeTypeOrProduct === 'object') {
+    type = feeTypeOrProduct.fee_type === 'FIXED' ? 'FIXED' : 'PERCENT';
+    val = typeof feeTypeOrProduct.fee_value === 'number'
+      ? feeTypeOrProduct.fee_value
+      : (parseMoney(feeTypeOrProduct.fee_value, 0) || parseMoney(feeTypeOrProduct.fee_percent, 0) || parseMoney(feeTypeOrProduct.fee_fixed, 0));
+  } else {
+    type = feeTypeOrProduct === 'FIXED' ? 'FIXED' : 'PERCENT';
+    val = parseMoney(feeValue, 0);
+  }
+
   if (val <= 0) return '0% (без комиссии)';
   if (type === 'PERCENT') {
-    return `+${val}%`;
+    return `${val}%`;
   }
-  return `+${formatMoney(val)}`;
+  return `${formatMoney(val)}`;
 }
 
 /**
