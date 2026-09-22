@@ -90,43 +90,29 @@ if (!BOT_TOKEN) {
   console.warn('[BOT WARNING] Переменная BOT_TOKEN не указана в .env файле.');
 }
 
-export const bot = new Telegraf(BOT_TOKEN || 'DUMMY_TOKEN_NOT_CONFIGURED');
+export const bot = new Telegraf(BOT_TOKEN || 'DUMMY_TOKEN_NOT_CONFIGURED', {
+  handlerTimeout: 9000000, // 9000 секунд вместо стандартных 90с во избежание TimeoutError
+});
 
 // Сессия Telegraf для хранения временных черновиков заказов
 bot.use(session());
 
-// Безопасный перехват ответов на callback_query во избежание TelegramError 400 (query is too old)
+// Безопасный глобальный перехват и моментальный ответ на callback_query
+// Telegram сразу снимает статус ожидания с кнопки, предотвращая зависание и таймауты
 bot.use(async (ctx, next) => {
   if (ctx.callbackQuery) {
+    // Немедленно подтверждаем callback query во избежание зависания "часиков" у пользователя
+    ctx.answerCbQuery().catch(() => {});
+
+    // Защищаем последующие повторные вызовы answerCbQuery от ошибок "query is too old / invalid"
     const origAnswer = ctx.answerCbQuery.bind(ctx);
-    let answered = false;
     ctx.answerCbQuery = async (...args) => {
-      answered = true;
       try {
         return await origAnswer(...args);
       } catch (err) {
-        const msg = err?.description || err?.message || '';
-        if (
-          msg.includes('query is too old') ||
-          msg.includes('response timeout expired') ||
-          msg.includes('query ID is invalid')
-        ) {
-          return false;
-        }
         return false;
       }
     };
-
-    // Автоматический быстрый ответ, чтобы кнопка никогда не зависала с "часиками"
-    // если конкретный обработчик не отправил answerCbQuery первым делом
-    try {
-      await next();
-    } finally {
-      if (!answered) {
-        ctx.answerCbQuery().catch(() => {});
-      }
-    }
-    return;
   }
   return next();
 });
@@ -4705,22 +4691,28 @@ bot.on('text', async (ctx) => {
 // ОБРАБОТКА ОШИБОК И ЗАПУСК
 // ==========================================
 
-// Глобальный перехват ошибок Telegraf (Crash Protection)
+// Глобальный перехват ошибок Telegraf (Crash Protection & Anti-Spam Loop)
 bot.catch(async (err, ctx) => {
-  const errDesc = err?.description || err?.message || '';
+  const errMsg = err?.message || err?.description || String(err);
+  console.error('[Bot Error]', err);
+
+  // Игнорируем таймауты, сетевые дропы, лимиты запросов и устаревшие callback'и, чтобы не спамить
   if (
-    errDesc.includes('query is too old') ||
-    errDesc.includes('response timeout expired') ||
-    errDesc.includes('query ID is invalid') ||
-    errDesc.includes('message is not modified')
+    errMsg.includes('Timed out') ||
+    errMsg.includes('timed out') ||
+    errMsg.includes('timeout') ||
+    errMsg.includes('TimeoutError') ||
+    errMsg.includes('429') ||
+    errMsg.includes('Too Many Requests') ||
+    errMsg.includes('query is too old') ||
+    errMsg.includes('response timeout expired') ||
+    errMsg.includes('query ID is invalid') ||
+    errMsg.includes('message is not modified')
   ) {
-    // Безопасно игнорируем устаревшие клики и неизмененные сообщения
     return;
   }
 
-  console.error(`[TELEGRAF ERROR] Ошибка обработки обновления ${ctx?.updateType || 'unknown'}:`, err);
-
-  // 1. Мягкое уведомление пользователю
+  // 1. Мягкое уведомление пользователю (безопасно, без риска повторного падения)
   try {
     const userChatId = ctx?.chat?.id || ctx?.from?.id;
     if (userChatId) {
@@ -4732,28 +4724,23 @@ bot.catch(async (err, ctx) => {
         userChatId,
         `⚠️ <b>Произошла временная ошибка, попробуйте еще раз.</b>\nЕсли проблема повторяется, обратитесь в поддержку: ${escapeHtml(SUPPORT_CONTACT)}`,
         getMainMenuKeyboard(userChatId)
-      );
+      ).catch(() => {});
     }
   } catch (userNoticeErr) {
-    console.error('[NOTICE USER ERROR]:', userNoticeErr.message);
+    // глушим
   }
 
-  // 2. Уведомление администратора(ов) со стектрейсом
+  // 2. Безопасная отправка админу без риска рекурсии и спама
   try {
     const adminIds = getAdminIds();
-    const stackSnippet = (err?.stack || String(err)).slice(0, 3000);
-    const alertMsg =
-      `🚨 <b>СИСТЕМНЫЙ СБОЙ / ОШИБКА БОТА!</b>\n\n` +
-      `<b>Тип обновления:</b> <code>${ctx?.updateType || 'unknown'}</code>\n` +
-      `<b>Пользователь:</b> ID <code>${ctx?.from?.id || 'unknown'}</code> (@${ctx?.from?.username || '-'})\n` +
-      `<b>Ошибка:</b> <code>${escapeHtml(err?.message || 'Unknown error')}</code>\n\n` +
-      `<b>Стектрейс:</b>\n<pre>${escapeHtml(stackSnippet)}</pre>`;
+    const shortErrMsg = errMsg.slice(0, 300);
+    const alertMsg = `⚠️ Ошибка: ${escapeHtml(shortErrMsg)}`;
 
     for (const aId of adminIds) {
-      await safeSendMessage(ctx.telegram, aId, alertMsg);
+      bot.telegram.sendMessage(aId, alertMsg, { parse_mode: 'HTML' }).catch(() => {});
     }
   } catch (adminAlertErr) {
-    console.error('[ALERT ADMIN ERROR]:', adminAlertErr.message);
+    // глушим
   }
 });
 
