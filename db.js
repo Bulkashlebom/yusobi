@@ -28,15 +28,31 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Путь к файлу базы данных SQLite на диске (строго физический файл, не :memory:)
-const DB_FILE_PATH = path.resolve(__dirname, 'shop.sqlite');
+// Настройка пути к базе данных: поддержка постоянных дисков (Persistent Storage / Volume)
+// Если задан постоянный путь через DATA_DIR или существует /app/data (Railway Volume), используем его.
+// Иначе — локальная папка data/ внутри проекта.
+const DB_DIR = process.env.DATA_DIR || (fs.existsSync('/app/data') ? '/app/data' : path.join(__dirname, 'data'));
 
-const dbDir = path.dirname(DB_FILE_PATH);
-if (!fs.existsSync(dbDir)) {
-  fs.mkdirSync(dbDir, { recursive: true });
+if (!fs.existsSync(DB_DIR)) {
+  fs.mkdirSync(DB_DIR, { recursive: true });
 }
 
-export const db = new Database(DB_FILE_PATH, {
+// Приоритетное имя файла базы shop.db (с авто-миграцией старого shop.sqlite при наличии)
+const dbPath = path.join(DB_DIR, 'shop.db');
+const legacyDbPath = path.join(__dirname, 'shop.sqlite');
+
+if (!fs.existsSync(dbPath) && fs.existsSync(legacyDbPath)) {
+  try {
+    fs.copyFileSync(legacyDbPath, dbPath);
+    console.log(`[DB MIGRATION] Существующая база данных успешно скопирована из ${legacyDbPath} в ${dbPath}`);
+  } catch (err) {
+    console.warn(`[DB MIGRATION WARNING] Не удалось перенести ${legacyDbPath}:`, err.message);
+  }
+}
+
+console.log(`[DB] Подключение к постоянной базе данных по пути: ${dbPath}`);
+
+export const db = new Database(dbPath, {
   verbose: process.env.NODE_ENV === 'development' ? console.log : null,
 });
 
