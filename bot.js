@@ -1,3 +1,11 @@
+process.on('uncaughtException', (err) => {
+  console.error('[CRITICAL CRASH PREVENTED] Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[CRITICAL CRASH PREVENTED] Unhandled Rejection:', reason);
+});
+
 /**
  * bot.js - Основной файл Telegram-бота магазина цифровых товаров на Telegraf
  * Работает ИСКЛЮЧИТЕЛЬНО на собственных товарах администратора из локальной БД SQLite.
@@ -576,11 +584,12 @@ export async function renderCatalogView(ctx, categoryTarget = 'root', page = 1, 
     }
 
     const buttons = result.items.map((prod) => {
-      let icon = prod.delivery_type === 'MANUAL' ? '✍️' : '⚡';
+      let icon = prod.emoji || (prod.delivery_type === 'MANUAL' ? '✍️' : '⚡');
       let priceLabel = formatMoney(prod.price);
       if (prod.product_type === 'FLEXIBLE') {
-        icon = '💳';
-        priceLabel = `от ${formatMoney(prod.min_amount)}`;
+        const curSym = (prod.currency_symbol && String(prod.currency_symbol).trim()) || '₽';
+        icon = prod.emoji || '💳';
+        priceLabel = `от ${formatMoney(prod.min_amount, curSym)}`;
       }
       const nameShort = prod.name.length > 22 ? prod.name.slice(0, 20) + '..' : prod.name;
       return [Markup.button.callback(`${icon} ${nameShort} — ${priceLabel}`, `view_prod_${prod.id}_1`)];
@@ -688,11 +697,12 @@ export async function renderCatalogView(ctx, categoryTarget = 'root', page = 1, 
   }
 
   const buttons = result.items.map((prod) => {
-    let icon = prod.delivery_type === 'MANUAL' ? '✍️' : '⚡';
+    let icon = prod.emoji || (prod.delivery_type === 'MANUAL' ? '✍️' : '⚡');
     let priceLabel = formatMoney(prod.price);
     if (prod.product_type === 'FLEXIBLE') {
-      icon = '💳';
-      priceLabel = `от ${formatMoney(prod.min_amount)}`;
+      const curSym = (prod.currency_symbol && String(prod.currency_symbol).trim()) || '₽';
+      icon = prod.emoji || '💳';
+      priceLabel = `от ${formatMoney(prod.min_amount, curSym)}`;
     }
     const nameShort = prod.name.length > 22 ? prod.name.slice(0, 20) + '..' : prod.name;
     return [Markup.button.callback(`${icon} ${nameShort} — ${priceLabel}`, `view_prod_${prod.id}_1`)];
@@ -781,15 +791,23 @@ async function renderProductCard(ctx, productId, rawQty = 1) {
   // Карточка услуги пополнения баланса (FLEXIBLE)
   if (product.product_type === 'FLEXIBLE') {
     const feeText = formatFeeLabel(product);
+    const curSym = (product.currency_symbol && String(product.currency_symbol).trim()) || '₽';
+    const rate = product.exchange_rate || 1.0;
     const decimalsText = product.allow_decimals
-      ? '🪙 Разрешены копейки / дробные (100.50 ₽)'
-      : '🔢 Только целые числа (100, 500 ₽)';
+      ? `🪙 Разрешены копейки / дробные (100.50 ${curSym})`
+      : `🔢 Только целые числа (100, 500 ${curSym})`;
+
+    let rateInfo = '';
+    if (curSym !== '₽' || rate !== 1.0) {
+      rateInfo = `💱 <b>Курс:</b> <b>1 ${curSym} = ${rate} ₽</b>\n`;
+    }
 
     const cardText =
-      `💳 <b>${escapeHtml(product.name)}</b>\n\n` +
+      `💳 <b>${product.emoji || '💳'} ${escapeHtml(product.name)}</b>\n\n` +
       `📝 <b>Описание:</b>\n${escapeHtml(product.description || 'Услуга пополнения баланса.')}\n\n` +
+      rateInfo +
       `📊 <b>Допустимый диапазон сумм:</b>\n` +
-      `От <b>${formatMoney(product.min_amount)}</b> до <b>${formatMoney(product.max_amount)}</b>\n\n` +
+      `От <b>${formatMoney(product.min_amount, curSym)}</b> до <b>${formatMoney(product.max_amount, curSym)}</b>\n\n` +
       `📈 <b>Комиссия / наценка:</b> <b>${feeText}</b>\n` +
       `⚙️ <b>Формат ввода:</b> ${decimalsText}\n\n` +
       `⚡ <i>Выберите готовую сумму ниже или введите любую свою:</i>`;
@@ -805,7 +823,7 @@ async function renderProductCard(ctx, productId, rawQty = 1) {
         buttons.push(
           chunk.map((amt) =>
             Markup.button.callback(
-              `${formatMoney(amt)}`,
+              `${formatMoney(amt, curSym)}`,
               `buy_flex_preset_${product.id}_${amt}`
             )
           )
@@ -985,6 +1003,7 @@ bot.action(/^buy_flex_preset_(\d+)_([\d.]+)$/, async (ctx) => {
   }
 
   const calc = calculateOrderFee(product, validation.amount);
+  const curSym = (product.currency_symbol && String(product.currency_symbol).trim()) || '₽';
 
   // НЕ СОЗДАВАТЬ ЗАКАЗ В БД ДО ОТПРАВКИ ЧЕКА! Сохраняем черновик исключительно в сессию:
   if (!ctx.session) ctx.session = {};
@@ -995,11 +1014,14 @@ bot.action(/^buy_flex_preset_(\d+)_([\d.]+)$/, async (ctx) => {
     amount: calc.baseAmount,
     totalPrice: calc.totalAmount,
     baseAmount: calc.baseAmount,
+    baseRub: calc.baseRub,
     feeAmount: calc.feeAmount,
     feePercent: calc.feePercent,
     feeType: calc.feeType,
     feeValue: calc.feeValue,
     feeBreakdownText: calc.feeBreakdownText,
+    currencySymbol: curSym,
+    exchangeRate: calc.exchangeRate,
     quantity: 1,
     buyerComment: null,
     step: 'AWAIT_LOGIN',
@@ -1013,10 +1035,11 @@ bot.action(/^buy_flex_preset_(\d+)_([\d.]+)$/, async (ctx) => {
 
   const promptText =
     `💬 <b>Оформление заявки на пополнение:</b>\n\n` +
-    `💳 <b>Услуга:</b> ${escapeHtml(product.name)}\n` +
-    `┌ 📥 <b>К зачислению на баланс:</b> <b>${formatMoney(calc.baseAmount)}</b>\n` +
+    `💳 <b>Услуга:</b> ${product.emoji || '💳'} ${escapeHtml(product.name)}\n` +
+    `┌ 📥 <b>К зачислению на баланс:</b> <b>${formatMoney(calc.baseAmount, curSym)}</b>` +
+    (calc.exchangeRate !== 1 || curSym !== '₽' ? ` (~${formatMoney(calc.baseRub, '₽')})\n` : '\n') +
     `├ 📊 <b>Комиссия сервиса:</b> <b>${calc.feeBreakdownText}</b>\n` +
-    `└ 💰 <b>Итого к оплате:</b> <b>${formatMoney(calc.totalAmount)}</b>\n\n` +
+    `└ 💰 <b>Итого к оплате:</b> <b>${formatMoney(calc.totalAmount, '₽')}</b>\n\n` +
     `Укажите логин или реквизиты вашего аккаунта (например: логин Steam или ID аккаунта):`;
 
   const keyboard = Markup.inlineKeyboard([
@@ -1049,16 +1072,22 @@ bot.action(/^buy_flexible_(\d+)$/, async (ctx) => {
     productId: product.id,
   });
 
+  const curSym = (product.currency_symbol && String(product.currency_symbol).trim()) || '₽';
   const feeNote = formatFeeLabel(product);
+  let rateNote = '';
+  if (curSym !== '₽' || (product.exchange_rate && product.exchange_rate !== 1.0)) {
+    rateNote = `💱 <b>Курс:</b> 1 ${curSym} = ${product.exchange_rate || 1.0} ₽\n`;
+  }
   const decimalsNote = product.allow_decimals
-    ? '<i>Поддерживаются как целые числа, так и копейки (например: 500 или 1500.50).</i>'
-    : '<i>Пожалуйста, вводите только целые суммы без копеек (например: 500 или 1000).</i>';
+    ? `<i>Поддерживаются как целые числа, так и дробные (например: 500 или 1500.50 ${curSym}).</i>`
+    : `<i>Пожалуйста, вводите только целые суммы без копеек (например: 500 или 1000 ${curSym}).</i>`;
 
   const text =
-    `💳 <b>Пополнение «${escapeHtml(product.name)}»</b>\n\n` +
-    `📊 <b>Допустимый диапазон:</b> от <b>${formatMoney(product.min_amount)}</b> до <b>${formatMoney(product.max_amount)}</b>\n` +
+    `💳 <b>Пополнение «${product.emoji || '💳'} ${escapeHtml(product.name)}»</b>\n\n` +
+    rateNote +
+    `📊 <b>Допустимый диапазон:</b> от <b>${formatMoney(product.min_amount, curSym)}</b> до <b>${formatMoney(product.max_amount, curSym)}</b>\n` +
     `📈 <b>Комиссия / наценка:</b> <b>${feeNote}</b>\n\n` +
-    `Отправьте желаемую сумму зачисления в чат:\n${decimalsNote}`;
+    `Отправьте желаемую сумму зачисления в валюте <b>${curSym}</b> в чат:\n${decimalsNote}`;
 
   const keyboard = Markup.inlineKeyboard([
     [Markup.button.callback('❌ Отмена', `view_prod_${product.id}_1`)],
@@ -1291,21 +1320,23 @@ async function sendDraftPaymentInstructions(ctx, draft) {
   let breakdownText = '';
   const totalAmt = draft.totalPrice || draft.amount;
   if (isFlex && draft.baseAmount) {
+    const curSym = draft.currencySymbol || '₽';
     let feeLine = '0% (без комиссии)';
     if (draft.feeAmount > 0) {
       if (draft.feeType === 'FIXED') {
-        feeLine = `+${formatMoney(draft.feeValue || draft.feeAmount)} (фикс.)`;
+        feeLine = `+${formatMoney(draft.feeValue || draft.feeAmount, '₽')} (фикс.)`;
       } else {
-        feeLine = `+${draft.feePercent}% (+${formatMoney(draft.feeAmount)})`;
+        feeLine = `+${draft.feePercent}% (+${formatMoney(draft.feeAmount, '₽')})`;
       }
     }
 
     breakdownText =
       `💳 <b>Услуга:</b> ${escapeHtml(draft.productName)}\n` +
-      `┌ 📥 <b>К зачислению:</b> <b>${formatMoney(draft.baseAmount)}</b>\n` +
+      `┌ 📥 <b>К зачислению:</b> <b>${formatMoney(draft.baseAmount, curSym)}</b>` +
+      (draft.exchangeRate && draft.exchangeRate !== 1 ? ` (~${formatMoney(draft.baseRub || (draft.baseAmount * draft.exchangeRate), '₽')})\n` : '\n') +
       `├ 📊 <b>Комиссия сервиса:</b> <b>${feeLine}</b>\n` +
-      (draft.discountAmount > 0 ? `├ 🎟 <b>Скидка (${escapeHtml(draft.promoCode)}):</b> <b>-${formatMoney(draft.discountAmount)}</b>\n` : '') +
-      `└ 💰 <b>Итого к переводу:</b> <b>${formatMoney(totalAmt)}</b>\n`;
+      (draft.discountAmount > 0 ? `├ 🎟 <b>Скидка (${escapeHtml(draft.promoCode)}):</b> <b>-${formatMoney(draft.discountAmount, '₽')}</b>\n` : '') +
+      `└ 💰 <b>Итого к переводу:</b> <b>${formatMoney(totalAmt, '₽')}</b>\n`;
   } else {
     breakdownText =
       `📦 <b>Товар:</b> ${escapeHtml(draft.productName)} (${draft.quantity || 1} шт.)\n` +
@@ -1422,20 +1453,22 @@ async function sendPaymentInstructions(ctx, order) {
 
   let breakdownText = '';
   if (isFlex && order.base_amount) {
+    const prod = order.product_id ? db.getProductById(order.product_id) : null;
+    const curSym = (prod?.currency_symbol && String(prod.currency_symbol).trim()) || '₽';
     let feeLine = '0% (без комиссии)';
     if (order.fee_amount > 0) {
       if (order.fee_type === 'FIXED') {
-        feeLine = `+${formatMoney(order.fee_value || order.fee_amount)} (фикс.)`;
+        feeLine = `+${formatMoney(order.fee_value || order.fee_amount, '₽')} (фикс.)`;
       } else {
-        feeLine = `+${order.fee_percent}% (+${formatMoney(order.fee_amount)})`;
+        feeLine = `+${order.fee_percent}% (+${formatMoney(order.fee_amount, '₽')})`;
       }
     }
 
     breakdownText =
       `💳 <b>Услуга:</b> ${escapeHtml(order.product_name)}\n` +
-      `┌ 📥 <b>К зачислению:</b> <b>${formatMoney(order.base_amount)}</b>\n` +
+      `┌ 📥 <b>К зачислению:</b> <b>${formatMoney(order.base_amount, curSym)}</b>\n` +
       `├ 📊 <b>Комиссия сервиса:</b> <b>${feeLine}</b>\n` +
-      `└ 💰 <b>Итого к переводу:</b> <b>${formatMoney(order.amount)}</b>\n`;
+      `└ 💰 <b>Итого к переводу:</b> <b>${formatMoney(order.amount, '₽')}</b>\n`;
   } else {
     breakdownText =
       `📦 <b>Товар:</b> ${escapeHtml(order.product_name)} (${order.quantity || 1} шт.)\n` +
@@ -1692,18 +1725,20 @@ bot.on(['photo', 'document'], async (ctx) => {
 
     let adminDetails = '';
     if (isFlex && order.base_amount) {
+      const prod = order.product_id ? db.getProductById(order.product_id) : null;
+      const curSym = (prod?.currency_symbol && String(prod.currency_symbol).trim()) || '₽';
       let feeLine = '0% (без комиссии)';
       if (order.fee_amount > 0) {
         if (order.fee_type === 'FIXED') {
-          feeLine = `+${formatMoney(order.fee_value || order.fee_amount)} (фикс.)`;
+          feeLine = `+${formatMoney(order.fee_value || order.fee_amount, '₽')} (фикс.)`;
         } else {
-          feeLine = `+${order.fee_percent}% (+${formatMoney(order.fee_amount)})`;
+          feeLine = `+${order.fee_percent}% (+${formatMoney(order.fee_amount, '₽')})`;
         }
       }
       adminDetails =
-        `📥 <b>К зачислению клиенту:</b> <b>${formatMoney(order.base_amount)}</b>\n` +
+        `📥 <b>К зачислению клиенту:</b> <b>${formatMoney(order.base_amount, curSym)}</b>\n` +
         `📊 <b>Комиссия:</b> ${feeLine}\n` +
-        `💰 <b>Сумма перевода:</b> <b>${formatMoney(order.amount)}</b>\n`;
+        `💰 <b>Сумма перевода:</b> <b>${formatMoney(order.amount, '₽')}</b>\n`;
     } else {
       adminDetails =
         `🔢 <b>Количество:</b> <b>${order.quantity} шт.</b>\n` +
@@ -2902,7 +2937,8 @@ bot.action('admin_products_list', async (ctx) => {
   const buttons = products.map((p) => {
     let stockLabel = '';
     if (p.product_type === 'FLEXIBLE') {
-      stockLabel = `от ${formatMoney(p.min_amount)}`;
+      const curSym = (p.currency_symbol && String(p.currency_symbol).trim()) || '₽';
+      stockLabel = `от ${formatMoney(p.min_amount, curSym)}`;
     } else if (p.is_sold || (!p.is_unlimited && p.stock <= 0)) {
       stockLabel = 'Закончился';
     } else if (p.is_unlimited) {
@@ -2912,7 +2948,7 @@ bot.action('admin_products_list', async (ctx) => {
     }
 
     const hideIcon = p.is_hidden ? '🙈 ' : '';
-    const typeIcon = p.product_type === 'FLEXIBLE' ? '💳 ' : '';
+    const typeIcon = p.emoji ? `${p.emoji} ` : (p.product_type === 'FLEXIBLE' ? '💳 ' : '📦 ');
     const nameShort = p.name.length > 14 ? p.name.slice(0, 12) + '..' : p.name;
     const buttonText = `${hideIcon}${typeIcon}#${p.id} ${nameShort} (${stockLabel})`;
 
@@ -2945,9 +2981,11 @@ export async function renderProductManagementCard(ctx, productId) {
 
   if (product.product_type === 'FLEXIBLE') {
     const feeLabel = formatFeeLabel(product);
+    const curSym = (product.currency_symbol && String(product.currency_symbol).trim()) || '₽';
+    const rate = product.exchange_rate || 1.0;
     const decimalsLabel = product.allow_decimals
-      ? '🪙 Разрешены копейки / дробные (100.50 ₽)'
-      : '🔢 Только целые числа (100, 500 ₽)';
+      ? `🪙 Разрешены копейки / дробные (100.50 ${curSym})`
+      : `🔢 Только целые числа (100, 500 ${curSym})`;
 
     const catName = product.category_id && db.getCategoryById(product.category_id)
       ? db.getCategoryById(product.category_id).name
@@ -2955,11 +2993,14 @@ export async function renderProductManagementCard(ctx, productId) {
 
     const cardText =
       `💳 <b>Карточка управления лотом #${product.id} (Пополнение баланса)</b>\n\n` +
+      `✨ <b>Эмодзи:</b> ${product.emoji || '📦'}\n` +
       `🏷 <b>Название:</b> ${escapeHtml(product.name)}\n` +
       `📁 <b>Категория:</b> ${escapeHtml(catName)}\n` +
       `📝 <b>Описание:</b> ${escapeHtml(product.description || 'нет')}\n` +
-      `📉 <b>Мин. сумма:</b> <b>${formatMoney(product.min_amount)}</b>\n` +
-      `📈 <b>Макс. сумма:</b> <b>${formatMoney(product.max_amount)}</b>\n` +
+      `💱 <b>Символ валюты:</b> <b>${curSym}</b>\n` +
+      `📈 <b>Курс:</b> <b>1 ${curSym} = ${rate} ₽</b>\n` +
+      `📉 <b>Мин. сумма:</b> <b>${formatMoney(product.min_amount, curSym)}</b>\n` +
+      `📈 <b>Макс. сумма:</b> <b>${formatMoney(product.max_amount, curSym)}</b>\n` +
       `📊 <b>Тип комиссии:</b> <b>${product.fee_type === 'FIXED' ? 'Фиксированная наценка (₽)' : 'Процент от суммы (%)'}</b>\n` +
       `💰 <b>Размер комиссии:</b> <b>${feeLabel}</b>\n` +
       `⚙️ <b>Формат сумм клиента:</b> <b>${decimalsLabel}</b>\n` +
@@ -2970,6 +3011,13 @@ export async function renderProductManagementCard(ctx, productId) {
       [
         Markup.button.callback('✏️ Название', `admin_edit_name_${product.id}`),
         Markup.button.callback('📝 Описание', `admin_edit_desc_${product.id}`),
+      ],
+      [
+        Markup.button.callback(`✨ Эмодзи (${product.emoji || '📦'})`, `admin_edit_emoji_${product.id}`),
+        Markup.button.callback(`💱 Валюта (${curSym})`, `admin_edit_cur_${product.id}`),
+      ],
+      [
+        Markup.button.callback(`📈 Курс (1 ${curSym} = ${rate} ₽)`, `admin_edit_rate_${product.id}`),
       ],
       [
         Markup.button.callback('📉 Мин. сумма', `admin_edit_min_${product.id}`),
@@ -3104,6 +3152,134 @@ bot.action(/^admin_edit_desc_(\d+)$/, async (ctx) => {
     `📝 <b>Введите новое описание для лота #${productId}</b> (или отправьте <code>-</code> чтобы оставить пустым):`,
     Markup.inlineKeyboard([[Markup.button.callback('❌ Отмена', `admin_manage_prod_${productId}`)]])
   );
+});
+
+// Редактирование эмодзи (FLEXIBLE / FIXED)
+bot.action(/^admin_edit_emoji_(\d+)$/, async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Доступ запрещен', { show_alert: true });
+  await ctx.answerCbQuery();
+  const productId = Number(ctx.match[1]);
+
+  userStates.set(ctx.from.id, {
+    type: 'ADMIN_EDIT_EMOJI',
+    productId: productId,
+  });
+
+  const keyboard = Markup.inlineKeyboard([
+    [
+      Markup.button.callback('🇷🇺 🇷🇺', `admin_set_emoji_${productId}_🇷🇺`),
+      Markup.button.callback('🇰🇿 🇰🇿', `admin_set_emoji_${productId}_🇰🇿`),
+      Markup.button.callback('🇹🇷 🇹🇷', `admin_set_emoji_${productId}_🇹🇷`),
+      Markup.button.callback('🇺🇦 🇺🇦', `admin_set_emoji_${productId}_🇺🇦`),
+    ],
+    [
+      Markup.button.callback('🇺🇸 🇺🇸', `admin_set_emoji_${productId}_🇺🇸`),
+      Markup.button.callback('🎮 🎮', `admin_set_emoji_${productId}_🎮`),
+      Markup.button.callback('⭐ ⭐', `admin_set_emoji_${productId}_⭐`),
+      Markup.button.callback('📦 📦', `admin_set_emoji_${productId}_📦`),
+    ],
+    [Markup.button.callback('❌ Отмена', `admin_manage_prod_${productId}`)],
+  ]);
+
+  await safeEditMessage(
+    ctx,
+    `✨ <b>Выберите эмодзи для лота #${productId} или отправьте любой свой эмодзи сообщением:</b>`,
+    keyboard
+  );
+});
+
+bot.action(/^admin_set_emoji_(\d+)_(.+)$/, async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Доступ запрещен', { show_alert: true });
+  await ctx.answerCbQuery();
+  const productId = Number(ctx.match[1]);
+  const emoji = ctx.match[2];
+  userStates.delete(ctx.from.id);
+  db.updateProductEmoji(productId, emoji);
+  await renderProductManagementCard(ctx, productId);
+});
+
+// Редактирование валюты (FLEXIBLE)
+bot.action(/^admin_edit_cur_(\d+)$/, async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Доступ запрещен', { show_alert: true });
+  await ctx.answerCbQuery();
+  const productId = Number(ctx.match[1]);
+
+  userStates.set(ctx.from.id, {
+    type: 'ADMIN_EDIT_CURRENCY',
+    productId: productId,
+  });
+
+  const keyboard = Markup.inlineKeyboard([
+    [
+      Markup.button.callback('₽ (Рубли)', `admin_set_cur_${productId}_₽`),
+      Markup.button.callback('₸ (Тенге)', `admin_set_cur_${productId}_₸`),
+      Markup.button.callback('₺ (Лиры)', `admin_set_cur_${productId}_₺`),
+    ],
+    [
+      Markup.button.callback('$ (USD)', `admin_set_cur_${productId}_$`),
+      Markup.button.callback('грн (Гривны)', `admin_set_cur_${productId}_грн`),
+      Markup.button.callback('⭐ (Stars)', `admin_set_cur_${productId}_⭐`),
+    ],
+    [Markup.button.callback('❌ Отмена', `admin_manage_prod_${productId}`)],
+  ]);
+
+  await safeEditMessage(
+    ctx,
+    `💱 <b>Выберите валюту для лота #${productId} или отправьте текстовый символ (например: <code>₸</code>, <code>₺</code>, <code>$</code>, <code>Stars</code>):</b>`,
+    keyboard
+  );
+});
+
+bot.action(/^admin_set_cur_(\d+)_(.+)$/, async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Доступ запрещен', { show_alert: true });
+  await ctx.answerCbQuery();
+  const productId = Number(ctx.match[1]);
+  const cur = ctx.match[2];
+  userStates.delete(ctx.from.id);
+  db.updateProductCurrency(productId, cur);
+  await renderProductManagementCard(ctx, productId);
+});
+
+// Редактирование курса конвертации (FLEXIBLE)
+bot.action(/^admin_edit_rate_(\d+)$/, async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Доступ запрещен', { show_alert: true });
+  await ctx.answerCbQuery();
+  const productId = Number(ctx.match[1]);
+  const product = db.getProductById(productId);
+  const curSym = (product?.currency_symbol && String(product.currency_symbol).trim()) || 'ед.';
+
+  userStates.set(ctx.from.id, {
+    type: 'ADMIN_EDIT_EXCHANGE_RATE',
+    productId: productId,
+  });
+
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('1.0 (Курс 1 к 1 / Рубли)', `admin_set_rate_${productId}_1`)],
+    [Markup.button.callback('❌ Отмена', `admin_manage_prod_${productId}`)],
+  ]);
+
+  await safeEditMessage(
+    ctx,
+    `📈 <b>Курс конвертации для лота #${productId}</b>\n\n` +
+    `Укажите, сколько <b>рублей (₽)</b> стоит <b>1 ${curSym}</b>.\n\n` +
+    `<i>Примеры:</i>\n` +
+    `• 1 ₸ = 0.20 ₽ -> введите <code>0.20</code>\n` +
+    `• 1 $ = 92.50 ₽ -> введите <code>92.50</code>\n` +
+    `• 1 ₺ = 2.85 ₽ -> введите <code>2.85</code>\n` +
+    `• 1 ⭐ = 1.95 ₽ -> введите <code>1.95</code>\n\n` +
+    `Отправьте курс числом сообщением в чат:`,
+    keyboard
+  );
+});
+
+bot.action(/^admin_set_rate_(\d+)_([\d\.]+)$/, async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Доступ запрещен', { show_alert: true });
+  await ctx.answerCbQuery();
+  const productId = Number(ctx.match[1]);
+  const rate = parseFloat(ctx.match[2]) || 1.0;
+  userStates.delete(ctx.from.id);
+  db.updateProductExchangeRate(productId, rate);
+  await renderProductManagementCard(ctx, productId);
 });
 
 // Редактирование цены
@@ -3525,7 +3701,37 @@ bot.action('wizard_type_flexible', async (ctx) => {
   if (!state) return startWizard(ctx, userStates);
 
   state.data.product_type = 'FLEXIBLE';
+  pushWizardStep(userStates, ctx.from.id, 'FLEX_EMOJI');
+  await renderWizardStep(ctx, userStates, true);
+});
+
+bot.action(/^wizard_flex_emoji_(.+)$/, async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Доступ запрещен', { show_alert: true });
+  await ctx.answerCbQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state) return;
+  state.data.emoji = ctx.match[1];
   pushWizardStep(userStates, ctx.from.id, 'FLEX_NAME');
+  await renderWizardStep(ctx, userStates, true);
+});
+
+bot.action(/^wizard_flex_cur_(.+)$/, async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Доступ запрещен', { show_alert: true });
+  await ctx.answerCbQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state) return;
+  state.data.currency_symbol = ctx.match[1];
+  pushWizardStep(userStates, ctx.from.id, 'FLEX_RATE');
+  await renderWizardStep(ctx, userStates, true);
+});
+
+bot.action(/^wizard_flex_rate_([\d\.]+)$/, async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Доступ запрещен', { show_alert: true });
+  await ctx.answerCbQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state) return;
+  state.data.exchange_rate = parseFloat(ctx.match[1]) || 1.0;
+  pushWizardStep(userStates, ctx.from.id, 'FLEX_DESC');
   await renderWizardStep(ctx, userStates, true);
 });
 
@@ -4030,6 +4236,8 @@ bot.on('text', async (ctx) => {
       );
     }
 
+    const curSym = (product.currency_symbol && String(product.currency_symbol).trim()) || '₽';
+
     // Сохраняем черновик заказа в сессию:
     if (!ctx.session) ctx.session = {};
     ctx.session.draftOrder = {
@@ -4040,11 +4248,14 @@ bot.on('text', async (ctx) => {
       amount: calc.baseAmount,
       totalPrice: calc.totalAmount,
       baseAmount: calc.baseAmount,
+      baseRub: calc.baseRub,
       feeAmount: calc.feeAmount,
       feePercent: calc.feePercent,
       feeType: calc.feeType,
       feeValue: calc.feeValue,
       feeBreakdownText: calc.feeBreakdownText,
+      currencySymbol: curSym,
+      exchangeRate: calc.exchangeRate,
       quantity: 1,
       buyerComment: null,
       step: 'AWAIT_LOGIN',
@@ -4058,10 +4269,11 @@ bot.on('text', async (ctx) => {
 
     const promptText =
       `💬 <b>Оформление заявки на пополнение:</b>\n\n` +
-      `💳 <b>Услуга:</b> ${escapeHtml(product.name)}\n` +
-      `┌ 📥 <b>К зачислению на баланс:</b> <b>${formatMoney(calc.baseAmount)}</b>\n` +
+      `💳 <b>Услуга:</b> ${product.emoji || '💳'} ${escapeHtml(product.name)}\n` +
+      `┌ 📥 <b>К зачислению на баланс:</b> <b>${formatMoney(calc.baseAmount, curSym)}</b>` +
+      (calc.exchangeRate !== 1 || curSym !== '₽' ? ` (~${formatMoney(calc.baseRub, '₽')})\n` : '\n') +
       `├ 📊 <b>Комиссия сервиса:</b> <b>${calc.feeBreakdownText}</b>\n` +
-      `└ 💰 <b>Итого к оплате:</b> <b>${formatMoney(calc.totalAmount)}</b>\n\n` +
+      `└ 💰 <b>Итого к оплате:</b> <b>${formatMoney(calc.totalAmount, '₽')}</b>\n\n` +
       `Укажите логин или реквизиты вашего аккаунта (например: логин Steam или ID аккаунта):`;
 
     const keyboard = Markup.inlineKeyboard([
@@ -4184,8 +4396,30 @@ bot.on('text', async (ctx) => {
     }
 
     // ВЕТКА ПОПОЛНЕНИЕ БАЛАНСА / ГИБКАЯ УСЛУГА
+    if (step === 'FLEX_EMOJI') {
+      data.emoji = text.trim() || '📦';
+      pushWizardStep(userStates, userId, 'FLEX_NAME');
+      return renderWizardStep(ctx, userStates, false);
+    }
+
     if (step === 'FLEX_NAME') {
       data.name = text;
+      pushWizardStep(userStates, userId, 'FLEX_CURRENCY');
+      return renderWizardStep(ctx, userStates, false);
+    }
+
+    if (step === 'FLEX_CURRENCY') {
+      data.currency_symbol = text.trim() || '₽';
+      pushWizardStep(userStates, userId, 'FLEX_RATE');
+      return renderWizardStep(ctx, userStates, false);
+    }
+
+    if (step === 'FLEX_RATE') {
+      const parsedRate = parseMoney(text, 1.0);
+      if (parsedRate <= 0) {
+        return ctx.reply('⚠️ Введите корректный курс больше нуля (например: <code>0.20</code>, <code>1.95</code> или <code>92.5</code>):', { parse_mode: 'HTML' });
+      }
+      data.exchange_rate = parsedRate;
       pushWizardStep(userStates, userId, 'FLEX_DESC');
       return renderWizardStep(ctx, userStates, false);
     }
@@ -4344,6 +4578,55 @@ bot.on('text', async (ctx) => {
     const newDesc = text === '-' ? '' : text;
     const updated = db.updateProductDescription(productId, newDesc);
     await ctx.reply(`✅ Описание лота #${updated.id} успешно обновлено!`, {
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('📦 К лоту', `admin_manage_prod_${updated.id}`)],
+        [Markup.button.callback('📋 К списку лотов', 'admin_products_list')],
+      ]),
+    });
+    return;
+  }
+
+  // 9.1. Админ меняет эмодзи товара
+  if (state?.type === 'ADMIN_EDIT_EMOJI' && isAdmin(userId)) {
+    const productId = state.productId;
+    userStates.delete(userId);
+    const updated = db.updateProductEmoji(productId, text.trim() || '📦');
+    await ctx.reply(`✅ Эмодзи лота #${updated.id} изменен на: <b>${updated.emoji}</b>`, {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('📦 К лоту', `admin_manage_prod_${updated.id}`)],
+        [Markup.button.callback('📋 К списку лотов', 'admin_products_list')],
+      ]),
+    });
+    return;
+  }
+
+  // 9.2. Админ меняет валюту товара
+  if (state?.type === 'ADMIN_EDIT_CURRENCY' && isAdmin(userId)) {
+    const productId = state.productId;
+    userStates.delete(userId);
+    const updated = db.updateProductCurrency(productId, text.trim() || '₽');
+    await ctx.reply(`✅ Валюта лота #${updated.id} изменена на: <b>${updated.currency_symbol}</b>`, {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('📦 К лоту', `admin_manage_prod_${updated.id}`)],
+        [Markup.button.callback('📋 К списку лотов', 'admin_products_list')],
+      ]),
+    });
+    return;
+  }
+
+  // 9.3. Админ меняет курс валюты товара
+  if (state?.type === 'ADMIN_EDIT_EXCHANGE_RATE' && isAdmin(userId)) {
+    const parsedRate = parseMoney(text, 0);
+    if (parsedRate <= 0) {
+      return ctx.reply('⚠️ Введите корректный курс больше нуля (например: <code>0.20</code>, <code>1.95</code> или <code>92.5</code>):', { parse_mode: 'HTML' });
+    }
+    const productId = state.productId;
+    userStates.delete(userId);
+    const updated = db.updateProductExchangeRate(productId, parsedRate);
+    await ctx.reply(`✅ Курс валюты лота #${updated.id} изменен: <b>1 ${updated.currency_symbol} = ${updated.exchange_rate} ₽</b>!`, {
+      parse_mode: 'HTML',
       ...Markup.inlineKeyboard([
         [Markup.button.callback('📦 К лоту', `admin_manage_prod_${updated.id}`)],
         [Markup.button.callback('📋 К списку лотов', 'admin_products_list')],
@@ -4840,50 +5123,32 @@ process.once('SIGTERM', () => {
   try { bot.stop('SIGTERM'); } catch (e) {}
 });
 
-// 2. ГЛОБАЛЬНЫЙ БЛОК try/catch ДЛЯ ИНИЦИАЛИЗАЦИИ БОТА И БД:
-export async function initApp() {
+// 2. БЕСКОНЕЧНЫЙ ЦИКЛ ПОДКЛЮЧЕНИЯ LONG-POLLING:
+async function launchBot() {
   if (isBotLaunching) return;
   isBotLaunching = true;
 
-  try {
-    console.log('[DB] База данных подключена успешно');
-
-    if (!BOT_TOKEN || BOT_TOKEN === 'DUMMY_TOKEN_NOT_CONFIGURED') {
-      console.log('[BOT INFO] Telegram-бот не запущен (укажите BOT_TOKEN в .env)');
-      isBotLaunching = false;
-      return;
-    }
-
-    // Снятие старых вебхуков и очистка очереди зависших запросов перед поллингом
-    await bot.telegram.deleteWebhook({ drop_pending_updates: true }).catch((err) => {
-      console.warn('[BOT WEBHOOK CLEANUP] Предупреждение при deleteWebhook:', err.message);
-    });
-
-    // Настройка бота и запуск
-    await bot.launch({
-      polling: {
-        timeout: 30,
-        limit: 100,
-        stopCallback: () => console.log('Polling остановлен'),
-      },
-    });
-
-    console.log('[Bot] Telegram бот успешно запущен');
-  } catch (err) {
-    console.error('[CRITICAL STARTUP ERROR] Ошибка при старте логики бота:', err);
+  if (!BOT_TOKEN || BOT_TOKEN === 'DUMMY_TOKEN_NOT_CONFIGURED') {
+    console.log('[BOT INFO] Telegram-бот не запущен (укажите BOT_TOKEN в .env)');
     isBotLaunching = false;
-    // НЕ вызываем process.exit(1), чтобы HTTP сервер продолжал жить и логи можно было прочитать!
-    setTimeout(() => {
-      console.log('[BOT RETRY] Повторная попытка запуска бота через 10 секунд...');
-      initApp();
-    }, 10000);
+    return;
+  }
+
+  try {
+    console.log('🔄 Подключение к Telegram API...');
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true }).catch(() => {});
+    await bot.launch();
+    console.log('✅ Telegram Bot успешно подключен к Polling');
+  } catch (err) {
+    console.error('⚠️ Ошибка подключения bot.launch. Перезапуск через 10 секунд...', err.message);
+    isBotLaunching = false;
+    setTimeout(launchBot, 10000);
   }
 }
 
-export const startBot = initApp;
+launchBot();
 
-if (process.argv[1] && (process.argv[1].endsWith('bot.js') || process.argv[1].endsWith('bot.ts'))) {
-  initApp();
-}
-
+export const initApp = launchBot;
+export const startBot = launchBot;
+export const startBotLoop = launchBot;
 export default bot;

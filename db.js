@@ -41,6 +41,7 @@ export const db = new Database(DB_FILE_PATH, {
 });
 
 db.pragma('journal_mode = WAL');
+db.pragma('busy_timeout = 5000');
 db.pragma('foreign_keys = ON');
 
 /**
@@ -100,15 +101,17 @@ export function parseMoney(val, defaultVal = 0) {
 }
 
 /**
- * Форматирование числа в денежный вид с разделителями и округлением: 1 020.00 ₽
+ * Форматирование числа в денежный вид с разделителями и округлением: 1 020.00 ₽ или 1 020.00 ₸
  * @param {number|string} val 
+ * @param {string} [currencySymbol='₽']
  * @returns {string}
  */
-export function formatMoney(val) {
+export function formatMoney(val, currencySymbol = '₽') {
   const num = parseMoney(val, 0);
   const parts = num.toFixed(2).split('.');
   const intPart = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
-  return `${intPart}.${parts[1]} ₽`;
+  const sym = currencySymbol ? String(currencySymbol).trim() : '₽';
+  return `${intPart}.${parts[1]} ${sym}`;
 }
 
 /**
@@ -121,12 +124,15 @@ export function formatMoney(val) {
 export function formatFeeLabel(feeTypeOrProduct, feeValue) {
   let type = 'PERCENT';
   let val = 0;
+  let sym = '₽';
 
   if (feeTypeOrProduct && typeof feeTypeOrProduct === 'object') {
     type = feeTypeOrProduct.fee_type === 'FIXED' ? 'FIXED' : 'PERCENT';
     val = typeof feeTypeOrProduct.fee_value === 'number'
       ? feeTypeOrProduct.fee_value
       : (parseMoney(feeTypeOrProduct.fee_value, 0) || parseMoney(feeTypeOrProduct.fee_percent, 0) || parseMoney(feeTypeOrProduct.fee_fixed, 0));
+    // Если фиксированная комиссия, она добавляется в рублях к сумме перевода
+    sym = '₽';
   } else {
     type = feeTypeOrProduct === 'FIXED' ? 'FIXED' : 'PERCENT';
     val = parseMoney(feeValue, 0);
@@ -136,22 +142,32 @@ export function formatFeeLabel(feeTypeOrProduct, feeValue) {
   if (type === 'PERCENT') {
     return `${val}%`;
   }
-  return `${formatMoney(val)}`;
+  return `${formatMoney(val, sym)}`;
 }
 
 /**
  * Расчет итоговой суммы и комиссии сервиса:
- * - Если fee_type == 'PERCENT': Итого = Сумма + (Сумма * (fee_value / 100))
- *   Пример: 1000 ₽ + 2% = 1020.00 ₽
- * - Если fee_type == 'FIXED': Итого = Сумма + fee_value
- *   Пример: 100 ₽ + 1.02 ₽ = 101.02 ₽
+ * Для пополнений (FLEXIBLE):
+ * - enteredAmount — это сумма в валюте пополнения (например, 1000 ₸ или 50 $).
+ * - exchange_rate — курс пересчета 1 ед. валюты лота в рубли (₽).
+ * - baseRub = enteredAmount * exchange_rate — базовая стоимость в рублях.
+ * - Если fee_type == 'PERCENT': Итого (₽) = baseRub + (baseRub * (fee_value / 100))
+ * - Если fee_type == 'FIXED': Итого (₽) = baseRub + fee_value
  * 
  * @param {Object} product
  * @param {number|string} enteredAmount
- * @returns {{ baseAmount: number, feeAmount: number, totalAmount: number, feeType: 'PERCENT'|'FIXED', feeValue: number, feeBreakdownText: string }}
+ * @returns {{ baseAmount: number, baseRub: number, feeAmount: number, totalAmount: number, feeType: 'PERCENT'|'FIXED', feeValue: number, feeBreakdownText: string, currencySymbol: string, exchangeRate: number }}
  */
 export function calculateOrderFee(product, enteredAmount) {
   const baseAmount = parseMoney(enteredAmount, 0);
+  const currencySymbol = (product?.currency_symbol && String(product.currency_symbol).trim()) || '₽';
+  const exchangeRate = typeof product?.exchange_rate === 'number' && product.exchange_rate > 0
+    ? product.exchange_rate
+    : (parseMoney(product?.exchange_rate, 1) || 1.0);
+
+  // Конвертация в базовые рубли
+  const baseRub = Math.round((baseAmount * exchangeRate) * 100) / 100;
+
   const feeType = product?.fee_type === 'FIXED' ? 'FIXED' : 'PERCENT';
   const feeValue = typeof product?.fee_value === 'number' 
     ? product.fee_value 
@@ -159,19 +175,19 @@ export function calculateOrderFee(product, enteredAmount) {
 
   let feeAmount = 0;
   if (feeType === 'PERCENT') {
-    feeAmount = Math.round((baseAmount * (feeValue / 100)) * 100) / 100;
+    feeAmount = Math.round((baseRub * (feeValue / 100)) * 100) / 100;
   } else {
     feeAmount = Math.round(feeValue * 100) / 100;
   }
 
-  const totalAmount = Math.round((baseAmount + feeAmount) * 100) / 100;
+  const totalAmount = Math.round((baseRub + feeAmount) * 100) / 100;
 
   let feeBreakdownText = '';
   if (feeValue > 0) {
     if (feeType === 'PERCENT') {
-      feeBreakdownText = `+${feeValue}% (${formatMoney(feeAmount)})`;
+      feeBreakdownText = `+${feeValue}% (${formatMoney(feeAmount, '₽')})`;
     } else {
-      feeBreakdownText = `+${formatMoney(feeAmount)}`;
+      feeBreakdownText = `+${formatMoney(feeAmount, '₽')}`;
     }
   } else {
     feeBreakdownText = '0 ₽ (без комиссии)';
@@ -179,11 +195,14 @@ export function calculateOrderFee(product, enteredAmount) {
 
   return {
     baseAmount,
+    baseRub,
     feeAmount,
     totalAmount,
     feeType,
     feeValue,
     feeBreakdownText,
+    currencySymbol,
+    exchangeRate,
   };
 }
 
@@ -203,6 +222,7 @@ export function validateFlexibleAmount(product, input) {
 
   const rawStr = String(input).trim().replace(/\s+/g, '');
   const allowDecimals = Boolean(product?.allow_decimals);
+  const curSym = (product?.currency_symbol && String(product.currency_symbol).trim()) || '₽';
 
   // Проверка на запрет дробных/копеек
   const hasSeparator = rawStr.includes('.') || rawStr.includes(',');
@@ -212,7 +232,7 @@ export function validateFlexibleAmount(product, input) {
     if (decimalDigits && !/^0+$/.test(decimalDigits)) {
       return {
         valid: false,
-        error: 'Пожалуйста, введите целое число без копеек (например: 500 или 1000).',
+        error: `Пожалуйста, введите целое число (например: 500 или 1000 ${curSym}).`,
       };
     }
   }
@@ -232,14 +252,14 @@ export function validateFlexibleAmount(product, input) {
   if (min > 0 && amount < min) {
     return {
       valid: false,
-      error: `Сумма меньше минимальной! Минимальное пополнение: ${formatMoney(min)}.`,
+      error: `Сумма меньше минимальной! Минимальное пополнение: ${formatMoney(min, curSym)}.`,
     };
   }
 
   if (max > 0 && amount > max) {
     return {
       valid: false,
-      error: `Сумма превышает максимальный лимит! Максимальное пополнение: ${formatMoney(max)}.`,
+      error: `Сумма превышает максимальный лимит! Максимальное пополнение: ${formatMoney(max, curSym)}.`,
     };
   }
 
@@ -327,11 +347,17 @@ export function initDatabase() {
       fee_percent REAL NOT NULL DEFAULT 0,
       fee_fixed REAL NOT NULL DEFAULT 0,
       requires_availability_check INTEGER NOT NULL DEFAULT 0,
+      emoji TEXT DEFAULT '📦',
+      currency_symbol TEXT DEFAULT '₽',
+      exchange_rate REAL DEFAULT 1.0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
   `);
 
   // Безопасное автоматическое добавление колонок custom_products (автомиграция)
+  addColumnIfNotExists('custom_products', 'emoji', "TEXT DEFAULT '📦'");
+  addColumnIfNotExists('custom_products', 'currency_symbol', "TEXT DEFAULT '₽'");
+  addColumnIfNotExists('custom_products', 'exchange_rate', 'REAL DEFAULT 1.0');
   addColumnIfNotExists('custom_products', 'requires_availability_check', 'INTEGER DEFAULT 0');
   addColumnIfNotExists('custom_products', 'category_id', 'INTEGER DEFAULT NULL');
   addColumnIfNotExists('custom_products', 'product_type', "TEXT DEFAULT 'FIXED'");
@@ -542,6 +568,9 @@ export function createProduct({
   fee_fixed = 0,
   requires_availability_check = 0,
   category_id = null,
+  emoji = '📦',
+  currency_symbol = '₽',
+  exchange_rate = 1.0,
 }) {
   const pType = product_type === 'FLEXIBLE' ? 'FLEXIBLE' : 'FIXED';
   const deliveryType = pType === 'FLEXIBLE' ? 'MANUAL' : (delivery_type === 'MANUAL' ? 'MANUAL' : 'AUTO');
@@ -591,15 +620,18 @@ export function createProduct({
   const finalAllowDecimals = allow_decimals ? 1 : 0;
   const finalReqCheck = requires_availability_check ? 1 : 0;
   const finalCategoryId = category_id ? Number(category_id) : null;
+  const finalEmoji = emoji && String(emoji).trim() ? String(emoji).trim() : '📦';
+  const finalCurrencySymbol = currency_symbol && String(currency_symbol).trim() ? String(currency_symbol).trim() : '₽';
+  const finalExchangeRate = Math.max(0.000001, parseMoney(exchange_rate, 1.0));
 
   const stmt = db.prepare(`
     INSERT INTO custom_products (
       name, description, price, delivery_type, secret_data, 
       stock, reserved_stock, is_unlimited, is_hidden, is_sold,
       product_type, min_amount, max_amount, fee_type, fee_value, allow_decimals, fee_percent, fee_fixed,
-      requires_availability_check, category_id
+      requires_availability_check, category_id, emoji, currency_symbol, exchange_rate
     )
-    VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const result = stmt.run(
@@ -620,7 +652,10 @@ export function createProduct({
     finalFeePercent,
     finalFeeFixed,
     finalReqCheck,
-    finalCategoryId
+    finalCategoryId,
+    finalEmoji,
+    finalCurrencySymbol,
+    finalExchangeRate
   );
 
   return getProductById(result.lastInsertRowid);
@@ -834,6 +869,48 @@ export function toggleProductRequiresAvailabilityCheck(productId) {
   if (!product) return null;
   const nextVal = product.requires_availability_check ? 0 : 1;
   return updateProductRequiresAvailabilityCheck(productId, nextVal);
+}
+
+/**
+ * Обновить эмодзи лота (флаг или значок)
+ */
+export function updateProductEmoji(productId, newEmoji) {
+  const emoji = newEmoji && String(newEmoji).trim() ? String(newEmoji).trim() : '📦';
+  db.prepare(`
+    UPDATE custom_products
+    SET emoji = ?
+    WHERE id = ?
+  `).run(emoji, Number(productId));
+
+  return getProductById(productId);
+}
+
+/**
+ * Обновить символ валюты лота (₸, ₺, $, грн, Stars и т.д.)
+ */
+export function updateProductCurrency(productId, newCurrencySymbol) {
+  const sym = newCurrencySymbol && String(newCurrencySymbol).trim() ? String(newCurrencySymbol).trim() : '₽';
+  db.prepare(`
+    UPDATE custom_products
+    SET currency_symbol = ?
+    WHERE id = ?
+  `).run(sym, Number(productId));
+
+  return getProductById(productId);
+}
+
+/**
+ * Обновить курс конвертации валюты лота к рублю (множитель)
+ */
+export function updateProductExchangeRate(productId, newExchangeRate) {
+  const rate = Math.max(0.000001, parseMoney(newExchangeRate, 1.0));
+  db.prepare(`
+    UPDATE custom_products
+    SET exchange_rate = ?
+    WHERE id = ?
+  `).run(rate, Number(productId));
+
+  return getProductById(productId);
 }
 
 /**
@@ -2134,6 +2211,9 @@ export default {
   updateProductMaxAmount,
   updateProductFee,
   updateProductAllowDecimals,
+  updateProductEmoji,
+  updateProductCurrency,
+  updateProductExchangeRate,
   updateProductRequiresAvailabilityCheck,
   toggleProductRequiresAvailabilityCheck,
   toggleProductDeliveryType,

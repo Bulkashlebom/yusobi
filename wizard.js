@@ -181,18 +181,83 @@ export async function renderWizardStep(ctx, userStates, edit = true) {
     // ==========================================
     // ВЕТКА «ПОПОЛНЕНИЕ БАЛАНСА / ГИБКАЯ УСЛУГА» (FLEXIBLE)
     // ==========================================
+    case 'FLEX_EMOJI': {
+      text =
+        `✨ <b>Пополнение баланса: Эмодзи лота</b>\n\n` +
+        `Выберите готовый эмодзи (флаг или значок) или отправьте любой свой эмодзи сообщением:` +
+        (data.emoji ? `\n\n<i>Текущий эмодзи:</i> ${data.emoji}` : '');
+
+      buttons = [
+        [
+          Markup.button.callback('🇷🇺 🇷🇺', 'wizard_flex_emoji_🇷🇺'),
+          Markup.button.callback('🇰🇿 🇰🇿', 'wizard_flex_emoji_🇰🇿'),
+          Markup.button.callback('🇹🇷 🇹🇷', 'wizard_flex_emoji_🇹🇷'),
+          Markup.button.callback('🇺🇦 🇺🇦', 'wizard_flex_emoji_🇺🇦'),
+        ],
+        [
+          Markup.button.callback('🇺🇸 🇺🇸', 'wizard_flex_emoji_🇺🇸'),
+          Markup.button.callback('🎮 🎮', 'wizard_flex_emoji_🎮'),
+          Markup.button.callback('⭐ ⭐', 'wizard_flex_emoji_⭐'),
+          Markup.button.callback('📦 📦', 'wizard_flex_emoji_📦'),
+        ],
+        backCancelRow,
+      ];
+      break;
+    }
+
     case 'FLEX_NAME': {
       text =
-        `💳 <b>Пополнение баланса (Шаг 1 из 6): Название услуги</b>\n\n` +
-        `Введите название услуги (например: <i>«Пополнение Steam РФ / СНГ»</i>):` +
+        `💳 <b>Пополнение баланса: Название услуги</b>\n\n` +
+        `Введите название услуги (например: <i>«Steam Казахстан (Тенге)»</i>):` +
         (data.name ? `\n\n<i>Текущее:</i> <code>${data.name}</code>` : '');
       buttons = [backCancelRow];
       break;
     }
 
+    case 'FLEX_CURRENCY': {
+      text =
+        `💱 <b>Пополнение баланса: Символ валюты</b>\n\n` +
+        `Выберите символ валюты пополнения или отправьте свой текст в чат (например: <code>₸</code>, <code>₺</code>, <code>$</code>, <code>грн</code>, <code>Stars</code>, <code>₽</code>):` +
+        (data.currency_symbol ? `\n\n<i>Текущая валюта:</i> <b>${data.currency_symbol}</b>` : '');
+
+      buttons = [
+        [
+          Markup.button.callback('₽ (Рубли)', 'wizard_flex_cur_₽'),
+          Markup.button.callback('₸ (Тенге)', 'wizard_flex_cur_₸'),
+          Markup.button.callback('₺ (Лиры)', 'wizard_flex_cur_₺'),
+        ],
+        [
+          Markup.button.callback('$ (USD)', 'wizard_flex_cur_$'),
+          Markup.button.callback('грн (Гривны)', 'wizard_flex_cur_грн'),
+          Markup.button.callback('⭐ (Stars)', 'wizard_flex_cur_⭐'),
+        ],
+        backCancelRow,
+      ];
+      break;
+    }
+
+    case 'FLEX_RATE': {
+      const curSym = data.currency_symbol || 'ед. валюты';
+      text =
+        `📈 <b>Пополнение баланса: Курс конвертации</b>\n\n` +
+        `Укажите, сколько <b>рублей (₽)</b> стоит <b>1 ${curSym}</b>.\n\n` +
+        `<i>Примеры:</i>\n` +
+        `• <b>1 тенге (₸)</b> = 0.20 ₽ -> введите <code>0.20</code>\n` +
+        `• <b>1 доллар ($)</b> = 92.50 ₽ -> введите <code>92.50</code>\n` +
+        `• <b>1 турецкая лира (₺)</b> = 2.85 ₽ -> введите <code>2.85</code>\n` +
+        `• <b>1 звезда (Telegram Stars)</b> = 1.95 ₽ -> введите <code>1.95</code>\n` +
+        `• <b>Валюта в рублях (₽)</b> -> введите <code>1</code>` +
+        (data.exchange_rate ? `\n\n<i>Текущий курс:</i> <b>1 ${curSym} = ${data.exchange_rate} ₽</b>` : '');
+      buttons = [
+        [Markup.button.callback('1.0 (Курс 1 к 1 / Рубли)', 'wizard_flex_rate_1')],
+        backCancelRow,
+      ];
+      break;
+    }
+
     case 'FLEX_DESC': {
       text =
-        `📝 <b>Пополнение баланса (Шаг 2 из 6): Описание / Инструкция</b>\n\n` +
+        `📝 <b>Пополнение баланса: Описание / Инструкция</b>\n\n` +
         `Введите описание или инструкцию для покупателя (например, как указать логин или ограничения) или отправьте <code>-</code>:` +
         (data.description ? `\n\n<i>Текущее:</i> <code>${data.description}</code>` : '');
       buttons = [backCancelRow];
@@ -202,7 +267,7 @@ export async function renderWizardStep(ctx, userStates, edit = true) {
     case 'FLEX_CATEGORY': {
       const categories = db.getAllCategories ? db.getAllCategories() : [];
       text =
-        `📁 <b>Пополнение баланса (Шаг 3 из 6): Выбор категории</b>\n\n` +
+        `📁 <b>Пополнение баланса: Выбор категории</b>\n\n` +
         `Выберите категорию из существующих или нажмите «Без категории»:\n\n` +
         (data.category_id
           ? `<i>Текущая:</i> <b>${(db.getCategoryById && db.getCategoryById(data.category_id)?.name) || 'ID ' + data.category_id}</b>\n\n`
@@ -219,19 +284,20 @@ export async function renderWizardStep(ctx, userStates, edit = true) {
     }
 
     case 'FLEX_RANGE': {
+      const curSym = data.currency_symbol || '₽';
       text =
-        `📊 <b>Пополнение баланса (Шаг 4 из 6): Минимальная и максимальная сумма</b>\n\n` +
-        `Введите диапазон сумм через дефис (например: <code>50-50000</code> или <code>100 - 15000</code>):` +
-        (data.min_amount && data.max_amount ? `\n\n<i>Текущий диапазон:</i> <b>${formatMoney(data.min_amount)} – ${formatMoney(data.max_amount)}</b>` : '');
+        `📊 <b>Пополнение баланса: Диапазон сумм (${curSym})</b>\n\n` +
+        `Введите минимальную и максимальную сумму пополнения в валюте <b>${curSym}</b> через дефис (например: <code>50-50000</code> или <code>100 - 15000</code>):` +
+        (data.min_amount && data.max_amount ? `\n\n<i>Текущий диапазон:</i> <b>${formatMoney(data.min_amount, curSym)} – ${formatMoney(data.max_amount, curSym)}</b>` : '');
       buttons = [backCancelRow];
       break;
     }
 
     case 'FLEX_FEE_TYPE': {
       text =
-        `📈 <b>Пополнение баланса (Шаг 5 из 6): Настройка комиссии</b>\n\n` +
+        `📈 <b>Пополнение баланса: Настройка комиссии</b>\n\n` +
         `Выберите способ начисления комиссии к сумме клиента:\n\n` +
-        `• <b>📈 В процентах (%)</b> — например, +2% к сумме (1000 ₽ -> 1020 ₽).\n` +
+        `• <b>📈 В процентах (%)</b> — например, +2% к сумме перевода.\n` +
         `• <b>➕ Фиксированная наценка (₽)</b> — например, +50 ₽ или +1.02 ₽ к любой сумме.`;
       buttons = [
         [
@@ -251,21 +317,22 @@ export async function renderWizardStep(ctx, userStates, edit = true) {
           (data.fee_value !== undefined ? `\n\n<i>Текущее:</i> <b>+${data.fee_value}%</b>` : '')
         : `➕ <b>Фиксированная наценка (₽)</b>\n\n` +
           `Введите фиксированную сумму наценки в рублях (например: <code>50</code>, <code>1.02</code> или <code>0</code>):` +
-          (data.fee_value !== undefined ? `\n\n<i>Текущее:</i> <b>+${formatMoney(data.fee_value)}</b>` : '');
+          (data.fee_value !== undefined ? `\n\n<i>Текущее:</i> <b>+${formatMoney(data.fee_value, '₽')}</b>` : '');
       buttons = [backCancelRow];
       break;
     }
 
     case 'FLEX_DECIMALS': {
+      const curSym = data.currency_symbol || '₽';
       text =
-        `⚙️ <b>Пополнение баланса (Шаг 6 из 6): Формат ввода клиентом</b>\n\n` +
+        `⚙️ <b>Пополнение баланса: Формат ввода клиентом</b>\n\n` +
         `Разрешать ли клиенту указывать копейки/дробные числа?\n\n` +
-        `• <b>🔢 Только целые числа (100, 500 ₽)</b> — клиент может вводить только целые суммы.\n` +
-        `• <b>🪙 Разрешить копейки / дробные (100.50 ₽)</b> — клиент может указать любую точную сумму с копейками (например: 100.50, 1.02 ₽).`;
+        `• <b>🔢 Только целые числа (100, 500 ${curSym})</b> — клиент может вводить только целые суммы.\n` +
+        `• <b>🪙 Разрешить копейки / дробные (100.50 ${curSym})</b> — клиент может указать любую точную сумму с копейками.`;
       buttons = [
         [
-          Markup.button.callback('🔢 Только целые числа (100, 500 ₽)', 'wizard_decimals_0'),
-          Markup.button.callback('🪙 Разрешить копейки / дробные (100.50 ₽)', 'wizard_decimals_1'),
+          Markup.button.callback(`🔢 Только целые (100, 500 ${curSym})`, 'wizard_decimals_0'),
+          Markup.button.callback(`🪙 Разрешить дробные (100.50 ${curSym})`, 'wizard_decimals_1'),
         ],
         backCancelRow,
       ];
@@ -274,21 +341,25 @@ export async function renderWizardStep(ctx, userStates, edit = true) {
 
     case 'FLEX_CONFIRM': {
       const isPercent = data.fee_type === 'PERCENT';
+      const curSym = data.currency_symbol || '₽';
       const feeLabel = (data.fee_value > 0)
-        ? (isPercent ? `+${data.fee_value}%` : `+${formatMoney(data.fee_value)}`)
+        ? (isPercent ? `+${data.fee_value}%` : `+${formatMoney(data.fee_value, '₽')}`)
         : '0% (без наценки)';
       const decimalsLabel = data.allow_decimals
-        ? '🪙 Разрешены копейки / дробные (100.50 ₽)'
-        : '🔢 Только целые числа (100, 500 ₽)';
+        ? `🪙 Разрешены копейки / дробные (100.50 ${curSym})`
+        : `🔢 Только целые числа (100, 500 ${curSym})`;
       const catObj = data.category_id ? db.getCategoryById(data.category_id) : null;
       const catLabel = catObj ? `📁 ${catObj.name}` : '🌐 Без категории';
 
       text =
         `✅ <b>Проверьте данные услуги пополнения:</b>\n\n` +
-        `💳 <b>Название:</b> ${data.name}\n` +
+        `✨ <b>Эмодзи:</b> ${data.emoji || '📦'}\n` +
+        `💳 <b>Название:</b> ${data.emoji || '📦'} ${data.name}\n` +
+        `💱 <b>Валюта:</b> <b>${curSym}</b>\n` +
+        `📈 <b>Курс:</b> <b>1 ${curSym} = ${data.exchange_rate || 1.0} ₽</b>\n` +
         `📁 <b>Категория:</b> ${catLabel}\n` +
         `📝 <b>Описание:</b> ${data.description || 'нет'}\n` +
-        `📊 <b>Диапазон сумм:</b> <b>${formatMoney(data.min_amount)} – ${formatMoney(data.max_amount)}</b>\n` +
+        `📊 <b>Диапазон сумм:</b> <b>${formatMoney(data.min_amount, curSym)} – ${formatMoney(data.max_amount, curSym)}</b>\n` +
         `📈 <b>Комиссия:</b> <b>${isPercent ? 'В процентах' : 'Фиксированная'} (${feeLabel})</b>\n` +
         `⚙️ <b>Формат ввода:</b> <b>${decimalsLabel}</b>\n\n` +
         `Создать и опубликовать услугу в каталоге?`;
@@ -369,6 +440,9 @@ export async function startWizard(ctx, userStates) {
       fee_percent: 0,
       fee_fixed: 0,
       requires_availability_check: 0,
+      emoji: '📦',
+      currency_symbol: '₽',
+      exchange_rate: 1.0,
     },
   });
 
@@ -402,6 +476,9 @@ export async function saveCreatedProduct(ctx, userStates) {
     fee_percent: d.fee_percent || 0,
     fee_fixed: d.fee_fixed || 0,
     requires_availability_check: d.requires_availability_check || 0,
+    emoji: d.emoji || '📦',
+    currency_symbol: d.currency_symbol || '₽',
+    exchange_rate: d.exchange_rate || 1.0,
   });
 
   userStates.delete(userId);
@@ -409,15 +486,17 @@ export async function saveCreatedProduct(ctx, userStates) {
   let summary = '';
   if (created.product_type === 'FLEXIBLE') {
     const isPercent = created.fee_type === 'PERCENT';
+    const curSym = created.currency_symbol || '₽';
     const feeLabel = (created.fee_value > 0)
-      ? (isPercent ? `+${created.fee_value}%` : `+${formatMoney(created.fee_value)}`)
+      ? (isPercent ? `+${created.fee_value}%` : `+${formatMoney(created.fee_value, '₽')}`)
       : '0% (без наценки)';
-    const decimalsLabel = created.allow_decimals ? '🪙 Разрешены копейки (дробные)' : '🔢 Только целые числа';
+    const decimalsLabel = created.allow_decimals ? `🪙 Разрешены копейки / дробные` : `🔢 Только целые числа`;
 
     summary =
       `🎉 <b>Услуга пополнения баланса успешно создана!</b>\n\n` +
-      `💳 <b>#${created.id}:</b> ${created.name}\n` +
-      `📊 Диапазон: <b>${formatMoney(created.min_amount)} – ${formatMoney(created.max_amount)}</b>\n` +
+      `💳 <b>#${created.id}:</b> ${created.emoji || '📦'} ${created.name}\n` +
+      `💱 Валюта: <b>${curSym}</b> (курс: 1 ${curSym} = ${created.exchange_rate || 1.0} ₽)\n` +
+      `📊 Диапазон: <b>${formatMoney(created.min_amount, curSym)} – ${formatMoney(created.max_amount, curSym)}</b>\n` +
       `📈 Наценка/комиссия: <b>${feeLabel}</b>\n` +
       `⚙️ Формат ввода клиента: <b>${decimalsLabel}</b>\n\n` +
       `Товар сразу доступен покупателям в каталоге!`;
@@ -428,8 +507,8 @@ export async function saveCreatedProduct(ctx, userStates) {
 
     summary =
       `🎉 <b>Штучный товар успешно создан!</b>\n\n` +
-      `📦 <b>#${created.id}:</b> ${created.name}\n` +
-      `💰 Цена: <b>${formatMoney(created.price)}</b>\n` +
+      `📦 <b>#${created.id}:</b> ${created.emoji || '📦'} ${created.name}\n` +
+      `💰 Цена: <b>${formatMoney(created.price, '₽')}</b>\n` +
       `🚚 Тип: ${created.delivery_type === 'AUTO' ? '⚡ Авто-выдача' : '✍️ Ручная выдача'}\n` +
       `📊 В наличии: <b>${stockLabel}</b>\n` +
       `🔍 Проверка наличия: <b>${created.requires_availability_check ? 'ВКЛ' : 'ВЫКЛ'}</b>\n\n` +
