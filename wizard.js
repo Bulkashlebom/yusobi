@@ -82,7 +82,7 @@ export async function renderWizardStep(ctx, userStates, edit = true) {
 
       const catButtons = [];
       for (const cat of categories) {
-        catButtons.push([Markup.button.callback(`📁 ${cat.name}`, `wizard_cat_select_${cat.id}`)]);
+        catButtons.push([Markup.button.callback(`${cat.emoji || '📁'} ${cat.name}`, `wizard_cat_select_${cat.id}`)]);
       }
       catButtons.push([Markup.button.callback('🌐 Без категории', 'wizard_cat_none')]);
       catButtons.push(backCancelRow);
@@ -275,7 +275,7 @@ export async function renderWizardStep(ctx, userStates, edit = true) {
 
       const catButtons = [];
       for (const cat of categories) {
-        catButtons.push([Markup.button.callback(`📁 ${cat.name}`, `wizard_cat_select_${cat.id}`)]);
+        catButtons.push([Markup.button.callback(`${cat.emoji || '📁'} ${cat.name}`, `wizard_cat_select_${cat.id}`)]);
       }
       catButtons.push([Markup.button.callback('🌐 Без категории', 'wizard_cat_none')]);
       catButtons.push(backCancelRow);

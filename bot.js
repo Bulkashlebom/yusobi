@@ -1,72 +1,71 @@
 process.on('uncaughtException', (err) => {
-  console.error('[CRITICAL CRASH PREVENTED] Uncaught Exception:', err);
+  console.error('[CRITICAL PREVENTED] Uncaught Exception:', err);
+  process.exitCode = 0;
 });
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('[CRITICAL CRASH PREVENTED] Unhandled Rejection:', reason);
+process.on('unhandledRejection', (reason) => {
+  console.error('[CRITICAL PREVENTED] Unhandled Rejection:', reason);
+  process.exitCode = 0;
+});
+process.on('warning', (warning) => {
+  if (warning.name !== 'ExperimentalWarning') {
+    console.warn('[NODE WARNING]', warning.message);
+  }
 });
 
 /**
  * bot.js - Основной файл Telegram-бота магазина цифровых товаров на Telegraf
  * Работает ИСКЛЮЧИТЕЛЬНО на собственных товарах администратора из локальной БД SQLite.
- *
- * ФУНКЦИОНАЛ:
- * 1. Типы товаров:
- *    - FIXED: Штучный товар (фикс. цена, авто-выдача или ручная выдача, покупка QTY шт.).
- *    - FLEXIBLE: Услуга пополнения баланса (клиент указывает сумму в диапазоне min..max + наценка/комиссия).
- * 2. Дробные числа:
- *    - Поддержка точек и запятых ("1,02" -> 1.02, 499.99).
- *    - Форматирование всех цен до сотых (102.50 ₽).
- * 3. Пошаговый мастер добавления товаров (FSM BACK / CANCEL):
- *    - Кнопки [ ◀️ Шаг назад ] и [ ❌ Отменить всё ] на каждом шаге.
- *    - Возможность вернуться и переписать любое поле.
- * 4. Управление и редактирование товаров в /admin:
- *    - Редактирование названий, описаний, цен, лимитов min/max и комиссии %.
- *    - Переключение типа доставки в 1 клик.
- *    - Скрытие/публикация на витрине.
- *    - Пополнение остатков и ключей.
- * 5. Проверка чеков администратором:
- *    - Подробный расчет комиссии и базовой суммы в чеке.
- *    - Выдача ровно qty ключей.
- *    - Защита от дублей.
- * 6. Возвраты (REFUND) и вечное сохранение выданных ключей в "🛍 Мои покупки".
  */
 
 import http from 'http';
+import https from 'https';
 
-// 1. В САМОМ ВЕРХУ bot.js:
-// Если bot.js запускается НАПРЯМУЮ как отдельный процесс (например, standalone на Railway или отдельном инстансе),
-// поднимаем HTTP-сервер для прохождения Health Check.
-// Если же bot.js импортируется в server.ts (Express), порт 3000 занимает основной Express веб-сервер.
-const isDirectRun = Boolean(
-  process.argv[1] && (process.argv[1].endsWith('bot.js') || process.argv[1].endsWith('bot.ts'))
-);
-
+// Keep-Alive HTTP сервер и самопинг для поддержания работы 24/7 (Anti-Sleep Guard)
 const PORT = process.env.PORT || 3000;
 let healthServer = null;
 
-if (isDirectRun) {
-  try {
-    healthServer = http.createServer((req, res) => {
+try {
+  healthServer = http.createServer((req, res) => {
+    if (req.url === '/health' || req.url === '/status') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', uptime: process.uptime(), time: new Date().toISOString() }));
-    });
+      return res.end(JSON.stringify({
+        status: 'ok',
+        uptime: Math.floor(process.uptime()),
+        timestamp: new Date().toISOString(),
+      }));
+    }
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('OK');
+  });
 
-    healthServer.on('error', (err) => {
-      if (err && err.code === 'EADDRINUSE') {
-        console.log(`[HTTP NOTE] Порт ${PORT} уже слушается другим процессом.`);
-      } else {
-        console.error('[HTTP ERROR]:', err?.message || err);
-      }
-    });
+  healthServer.on('error', (err) => {
+    if (err && err.code === 'EADDRINUSE') {
+      // Порт уже слушается основным Express-сервером
+    } else {
+      console.error('[HTTP ERROR]', err);
+    }
+  });
 
-    healthServer.listen(PORT, '0.0.0.0', () => {
-      console.log(`[Standalone Bot] Health server listening on 0.0.0.0:${PORT}`);
-    });
-  } catch (httpErr) {
-    console.error('[HTTP INIT ERROR]:', httpErr.message);
+  healthServer.listen(PORT, '0.0.0.0', () => {
+    console.log(`[HTTP] Сервер на порту ${PORT}`);
+  });
+} catch (e) {}
+
+// Функция самопинга каждые 3 минуты (локально + публичный URL при наличии)
+function pingKeepAlive() {
+  http.get(`http://127.0.0.1:${PORT}/health`, () => {}).on('error', () => {});
+
+  const publicUrl = process.env.APP_URL || process.env.RENDER_EXTERNAL_URL || process.env.RAILWAY_STATIC_URL || process.env.PUBLIC_URL;
+  if (publicUrl) {
+    try {
+      const targetUrl = publicUrl.startsWith('http') ? publicUrl : `https://${publicUrl}`;
+      const client = targetUrl.startsWith('https') ? https : http;
+      client.get(targetUrl, () => {}).on('error', () => {});
+    } catch (e) {}
   }
 }
+
+setInterval(pingKeepAlive, 3 * 60 * 1000);
 
 import { Telegraf, Markup, session } from 'telegraf';
 import fs from 'fs';
@@ -98,8 +97,8 @@ if (!BOT_TOKEN) {
   console.warn('[BOT WARNING] Переменная BOT_TOKEN не указана в .env файле.');
 }
 
-export const bot = new Telegraf(BOT_TOKEN || 'DUMMY_TOKEN_NOT_CONFIGURED', {
-  handlerTimeout: 9000000, // 9000 секунд вместо стандартных 90с во избежание TimeoutError
+export const bot = new Telegraf(process.env.BOT_TOKEN || BOT_TOKEN || 'DUMMY_TOKEN_NOT_CONFIGURED', {
+  handlerTimeout: 600000, // 10 минут
 });
 
 // Сессия Telegraf для хранения временных черновиков заказов
@@ -629,26 +628,40 @@ export async function renderCatalogView(ctx, categoryTarget = 'root', page = 1, 
       return renderCatalogView(ctx, 'all', 1);
     }
 
-    const allProducts = db.getAvailableProducts();
-    if (!allProducts || allProducts.length === 0) {
-      return safeEditMessage(
-        ctx,
-        `📭 <b>В данный момент все товары распроданы или забронированы!</b>\n\nАдминистратор скоро пополнит ассортимент. Загляните позже!`,
-        Markup.inlineKeyboard([[Markup.button.callback('◀️ Назад в меню', 'main_menu')]])
-      );
-    }
+    const limit = 8;
+    const totalCategories = categories.length;
+    const totalPages = Math.ceil(totalCategories / limit) || 1;
+    const currentPage = Math.max(1, Math.min(Number(page) || 1, totalPages));
+    const offset = (currentPage - 1) * limit;
+    const pageCategories = categories.slice(offset, offset + limit);
 
     const buttons = [];
-    for (const cat of categories) {
-      const res = db.getAvailableProductsByCategory(cat.id, { page: 1, limit: 1 });
+    for (const cat of pageCategories) {
+      const res = db.getAvailableProductsByCategory ? db.getAvailableProductsByCategory(cat.id, { page: 1, limit: 1 }) : { total: 0 };
       const count = res.total !== undefined ? res.total : 0;
-      buttons.push([Markup.button.callback(`📁 ${cat.name} (${count} шт.)`, `cat_view_${cat.id}_1`)]);
+      const icon = cat.emoji || '📁';
+      const countText = count > 0 ? ` (${count} шт.)` : '';
+      buttons.push([Markup.button.callback(`${icon} ${cat.name}${countText}`, `cat_view_${cat.id}_1`)]);
     }
 
-    const uncategorized = db.getAvailableProductsByCategory('NONE', { page: 1, limit: 1 });
-    const uncategorizedCount = uncategorized.total !== undefined ? uncategorized.total : 0;
-    if (uncategorizedCount > 0) {
-      buttons.push([Markup.button.callback(`📁 Другие товары (${uncategorizedCount} шт.)`, 'cat_view_none_1')]);
+    if (currentPage === totalPages) {
+      const uncategorized = db.getAvailableProductsByCategory('NONE', { page: 1, limit: 1 });
+      const uncategorizedCount = uncategorized.total !== undefined ? uncategorized.total : 0;
+      if (uncategorizedCount > 0) {
+        buttons.push([Markup.button.callback(`📦 Другие товары (${uncategorizedCount} шт.)`, 'cat_view_none_1')]);
+      }
+    }
+
+    if (totalPages > 1) {
+      const pagRow = [];
+      if (currentPage > 1) {
+        pagRow.push(Markup.button.callback('⬅️', `cat_view_root_${currentPage - 1}`));
+      }
+      pagRow.push(Markup.button.callback(`Стр. ${currentPage}/${totalPages}`, 'cat_page_noop'));
+      if (currentPage < totalPages) {
+        pagRow.push(Markup.button.callback('➡️', `cat_view_root_${currentPage + 1}`));
+      }
+      buttons.push(pagRow);
     }
 
     buttons.push([
@@ -658,11 +671,11 @@ export async function renderCatalogView(ctx, categoryTarget = 'root', page = 1, 
     buttons.push([Markup.button.callback('◀️ Назад в главное меню', 'main_menu')]);
 
     const text =
-      `📦 <b>Каталог товаров</b>\n\n` +
+      `📦 <b>Каталог товаров и категорий</b>\n\n` +
       `⚡ — Авто-выдача (мгновенно после проверки чека)\n` +
       `✍️ — Ручная выдача (администратор передаст лично)\n` +
       `💳 — Пополнение баланса (ввод суммы клиентом)\n\n` +
-      `Выберите категорию или воспользуйтесь поиском:`;
+      `Выберите категорию (всего: <b>${totalCategories}</b>) или воспользуйтесь поиском:`;
 
     return safeEditMessage(ctx, text, Markup.inlineKeyboard(buttons));
   }
@@ -680,7 +693,7 @@ export async function renderCatalogView(ctx, categoryTarget = 'root', page = 1, 
     const catId = Number(categoryTarget);
     const cat = db.getCategoryById(catId);
     result = db.getAvailableProductsByCategory(catId, { page, limit: 6 });
-    categoryTitle = cat ? `📁 ${cat.name}` : '📁 Товары категории';
+    categoryTitle = cat ? `${cat.emoji || '📁'} ${cat.name}` : '📁 Товары категории';
   }
 
   if (!result.items || result.items.length === 0) {
@@ -3863,21 +3876,40 @@ bot.action('wizard_decimals_1', async (ctx) => {
 // УПРАВЛЕНИЕ КАТЕГОРИЯМИ ТОВАРОВ (ADMIN)
 // ==========================================
 
-bot.action('admin_categories_menu', async (ctx) => {
+bot.action([/^admin_categories_menu(?:_(\d+))?$/, 'admin_categories_menu'], async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Доступ запрещен', { show_alert: true });
   await ctx.answerCbQuery().catch(() => {});
   userStates.delete(ctx.from.id);
 
+  const page = Number(ctx.match && ctx.match[1]) || 1;
   const categories = db.getAllCategories ? db.getAllCategories() : [];
-  const buttons = [];
+  const limit = 8;
+  const totalPages = Math.ceil(categories.length / limit) || 1;
+  const currentPage = Math.max(1, Math.min(page, totalPages));
+  const offset = (currentPage - 1) * limit;
+  const pageCategories = categories.slice(offset, offset + limit);
 
-  categories.forEach((cat) => {
+  const buttons = [];
+  pageCategories.forEach((cat) => {
     const res = db.getAvailableProductsByCategory ? db.getAvailableProductsByCategory(cat.id, { page: 1, limit: 1 }) : { total: 0 };
     const count = res.total !== undefined ? res.total : 0;
+    const icon = cat.emoji || '📁';
     buttons.push([
-      Markup.button.callback(`📁 ${cat.name} (${count} акт. товаров)`, `admin_manage_cat_${cat.id}`),
+      Markup.button.callback(`${icon} ${cat.name} (${count} акт.)`, `admin_manage_cat_${cat.id}`),
     ]);
   });
+
+  if (totalPages > 1) {
+    const pagRow = [];
+    if (currentPage > 1) {
+      pagRow.push(Markup.button.callback('⬅️', `admin_categories_menu_${currentPage - 1}`));
+    }
+    pagRow.push(Markup.button.callback(`Стр. ${currentPage}/${totalPages}`, 'cat_page_noop'));
+    if (currentPage < totalPages) {
+      pagRow.push(Markup.button.callback('➡️', `admin_categories_menu_${currentPage + 1}`));
+    }
+    buttons.push(pagRow);
+  }
 
   buttons.push([Markup.button.callback('➕ Создать категорию', 'admin_create_category')]);
   buttons.push([Markup.button.callback('◀️ Назад в админ-панель', 'admin_panel')]);
@@ -4035,7 +4067,8 @@ bot.action(/^admin_edit_cat_(\d+)$/, async (ctx) => {
 
   for (const cat of categories) {
     const isCurrent = product.category_id === cat.id ? ' (текущая)' : '';
-    buttons.push([Markup.button.callback(`📁 ${cat.name}${isCurrent}`, `admin_set_prod_cat_${productId}_${cat.id}`)]);
+    const icon = cat.emoji || '📁';
+    buttons.push([Markup.button.callback(`${icon} ${cat.name}${isCurrent}`, `admin_set_prod_cat_${productId}_${cat.id}`)]);
   }
 
   const isNone = !product.category_id ? ' (текущая)' : '';
@@ -4134,15 +4167,13 @@ bot.on('text', async (ctx) => {
   // 0.1. Админ создает категорию
   if (state?.type === 'ADMIN_CREATE_CATEGORY' && isAdmin(userId)) {
     userStates.delete(userId);
-    const catName = text.trim();
-    if (!catName || catName.length < 2) {
-      return ctx.reply('⚠️ Название категории должно быть не менее 2 символов.', Markup.inlineKeyboard([
-        [Markup.button.callback('◀️ Назад к категориям', 'admin_categories_menu')],
-      ]));
-    }
-    const created = db.createCategory ? db.createCategory({ name: catName }) : null;
+    const name = ctx.message?.text?.trim();
+    if (!name) return ctx.reply('⚠️ Введите корректное название:', Markup.inlineKeyboard([
+      [Markup.button.callback('◀️ Назад к категориям', 'admin_categories_menu')],
+    ]));
+    db.prepare('INSERT INTO categories (name) VALUES (?)').run(name);
     return ctx.reply(
-      `✅ <b>Категория «${escapeHtml(catName)}» успешно создана!</b>\n\nТеперь вы можете привязать к ней существующие или новые товары.`,
+      `✅ <b>Категория «${escapeHtml(name)}» успешно создана!</b>\n\nТеперь вы можете привязать к ней существующие или новые товары.`,
       {
         parse_mode: 'HTML',
         ...Markup.inlineKeyboard([
@@ -5011,24 +5042,35 @@ bot.on('text', async (ctx) => {
 
 // Глобальный перехват ошибок Telegraf (Crash Protection & Anti-Spam Loop)
 bot.catch(async (err, ctx) => {
-  const errMsg = err?.message || err?.description || String(err);
-  console.error('[Bot Error]', err);
+  const msg = err?.message || err?.description || String(err);
 
-  // Игнорируем таймауты, сетевые дропы, лимиты запросов и устаревшие callback'и, чтобы не спамить
-  if (
-    errMsg.includes('Timed out') ||
-    errMsg.includes('timed out') ||
-    errMsg.includes('timeout') ||
-    errMsg.includes('TimeoutError') ||
-    errMsg.includes('429') ||
-    errMsg.includes('Too Many Requests') ||
-    errMsg.includes('query is too old') ||
-    errMsg.includes('response timeout expired') ||
-    errMsg.includes('query ID is invalid') ||
-    errMsg.includes('message is not modified')
-  ) {
+  // При конфликте 409 инициируем мягкий перезапуск polling
+  if (msg.includes('409') || msg.includes('Conflict')) {
+    console.error('[TG 409 CONFLICT] Конфликт сессий getUpdates. Инициирован перезапуск polling...');
+    try { bot.stop(); } catch (e) {}
     return;
   }
+
+  if (
+    msg.includes('429') ||
+    msg.includes('timeout') ||
+    msg.includes('network') ||
+    msg.includes('ETIMEDOUT') ||
+    msg.includes('ECONNRESET') ||
+    msg.includes('EAI_AGAIN') ||
+    msg.includes('ENOTFOUND') ||
+    msg.includes('ECONNREFUSED') ||
+    msg.includes('Timed out') ||
+    msg.includes('Too Many Requests') ||
+    msg.includes('query is too old') ||
+    msg.includes('response timeout expired') ||
+    msg.includes('query ID is invalid') ||
+    msg.includes('message is not modified')
+  ) {
+    console.error('[TG SILENT NETWORK ERROR]', msg);
+    return;
+  }
+  console.error('[BOT ERROR]', err);
 
   // 1. Мягкое уведомление пользователю (безопасно, без риска повторного падения)
   try {
@@ -5051,7 +5093,7 @@ bot.catch(async (err, ctx) => {
   // 2. Безопасная отправка админу без риска рекурсии и спама
   try {
     const adminIds = getAdminIds();
-    const shortErrMsg = errMsg.slice(0, 300);
+    const shortErrMsg = msg.slice(0, 300);
     const alertMsg = `⚠️ Ошибка: ${escapeHtml(shortErrMsg)}`;
 
     for (const aId of adminIds) {
@@ -5106,7 +5148,59 @@ process.on('unhandledRejection', (reason, promise) => {
   } catch (e) {}
 });
 
+let isBotConnected = false;
 let isBotLaunching = false;
+let consecutiveFailures = 0;
+let watchdogInterval = null;
+
+// Фоновый мониторинг связи с Telegram API (Watchdog) для поддержания вечной работы 24/7
+function startWatchdog() {
+  if (watchdogInterval) return;
+
+  watchdogInterval = setInterval(async () => {
+    if (!isBotConnected || !BOT_TOKEN || BOT_TOKEN === 'DUMMY_TOKEN_NOT_CONFIGURED') {
+      return;
+    }
+
+    try {
+      await bot.telegram.getMe();
+      consecutiveFailures = 0;
+    } catch (err) {
+      consecutiveFailures++;
+      const msg = err?.message || String(err);
+      console.warn(`[WATCHDOG] Сбой связи с Telegram API (${consecutiveFailures}/3):`, msg);
+
+      // Если 3 проверки подряд завершились неудачей — мягко перезапускаем polling
+      if (consecutiveFailures >= 3) {
+        console.error('[WATCHDOG] Связь с Telegram потеряна! Принудительный перезапуск polling...');
+        consecutiveFailures = 0;
+        try {
+          bot.stop();
+        } catch (e) {}
+      }
+    }
+  }, 45 * 1000); // каждые 45 секунд
+}
+
+// 24/7 Periodic Maintenance: очистка устаревших FSM-состояний и пассивный сброс WAL
+setInterval(() => {
+  try {
+    const now = Date.now();
+    for (const [userId, state] of userStates.entries()) {
+      if (state && state.createdAt && (now - state.createdAt > 24 * 60 * 60 * 1000)) {
+        userStates.delete(userId);
+      }
+    }
+  } catch (e) {}
+}, 60 * 60 * 1000); // раз в час
+
+setInterval(() => {
+  try {
+    if (db && db.pragma) {
+      db.pragma('wal_checkpoint(PASSIVE)');
+    }
+  } catch (e) {}
+}, 30 * 60 * 1000); // каждые 30 минут
 
 // 3. Плавная остановка (Graceful Shutdown)
 process.once('SIGINT', () => {
@@ -5123,32 +5217,52 @@ process.once('SIGTERM', () => {
   try { bot.stop('SIGTERM'); } catch (e) {}
 });
 
-// 2. БЕСКОНЕЧНЫЙ ЦИКЛ ПОДКЛЮЧЕНИЯ LONG-POLLING:
-async function launchBot() {
+// Вечный цикл запуска с переподключением Polling (24/7):
+export async function startBot() {
   if (isBotLaunching) return;
   isBotLaunching = true;
 
   if (!BOT_TOKEN || BOT_TOKEN === 'DUMMY_TOKEN_NOT_CONFIGURED') {
     console.log('[BOT INFO] Telegram-бот не запущен (укажите BOT_TOKEN в .env)');
-    isBotLaunching = false;
     return;
   }
 
-  try {
-    console.log('🔄 Подключение к Telegram API...');
-    await bot.telegram.deleteWebhook({ drop_pending_updates: true }).catch(() => {});
-    await bot.launch();
-    console.log('✅ Telegram Bot успешно подключен к Polling');
-  } catch (err) {
-    console.error('⚠️ Ошибка подключения bot.launch. Перезапуск через 10 секунд...', err.message);
-    isBotLaunching = false;
-    setTimeout(launchBot, 10000);
+  // Запуск фонового мониторинга здоровья соединения
+  startWatchdog();
+
+  while (true) {
+    try {
+      console.log('[BOT] Запуск polling...');
+      await bot.telegram.deleteWebhook({ drop_pending_updates: true }).catch(() => {});
+      await bot.launch({
+        dropPendingUpdates: true,
+      });
+      isBotConnected = true;
+      consecutiveFailures = 0;
+      console.log('✅ [BOT] Бот успешно подключен и готов к работе 24/7');
+      await new Promise((resolve) => bot.once('stop', resolve));
+      console.log('[BOT] Polling остановлен, инициируется повторное подключение...');
+    } catch (err) {
+      isBotConnected = false;
+      const errMsg = err?.message || String(err);
+      console.error('[BOT ERROR]', errMsg);
+
+      if (errMsg.includes('409') || errMsg.includes('Conflict')) {
+        console.log('[BOT] Конфликт 409: пауза 10 сек перед повторной очисткой вебхука...');
+        await new Promise((r) => setTimeout(r, 10000));
+        await bot.telegram.deleteWebhook({ drop_pending_updates: true }).catch(() => {});
+      }
+    }
+
+    isBotConnected = false;
+    console.log('[BOT] Перезапуск через 5 сек...');
+    await new Promise((r) => setTimeout(r, 5000));
   }
 }
 
-launchBot();
+startBot();
 
-export const initApp = launchBot;
-export const startBot = launchBot;
-export const startBotLoop = launchBot;
+export const launchBot = startBot;
+export const initApp = startBot;
+export const startBotLoop = startBot;
 export default bot;

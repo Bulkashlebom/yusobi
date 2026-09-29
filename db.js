@@ -58,7 +58,9 @@ export const db = new Database(dbPath, {
 
 db.pragma('journal_mode = WAL');
 db.pragma('busy_timeout = 5000');
+db.pragma('synchronous = NORMAL');
 db.pragma('foreign_keys = ON');
+db.pragma('cache_size = -64000');
 
 /**
  * Безопасное автоматическое добавление недостающих колонок при запуске приложения (автомиграция)
@@ -223,6 +225,15 @@ export function calculateOrderFee(product, enteredAmount) {
 }
 
 /**
+ * Универсальный расчет цены для гибких товаров/пополнений
+ */
+export function calculateFlexiblePrice({ amount, exchange_rate = 1.0, fee_type = 'PERCENT', fee_value = 0 }) {
+  const baseRub = amount * exchange_rate;
+  let totalRub = fee_type === 'PERCENT' ? baseRub * (1 + fee_value / 100) : baseRub + fee_value;
+  return Math.ceil(totalRub * 100) / 100;
+}
+
+/**
  * Валидация ввода суммы клиентом с учетом allow_decimals и лимитов:
  * - Если allow_decimals == 0: только целые числа (при 100.5 -> ошибка)
  * - Если allow_decimals == 1: разрешены дробные/копейки (100, 100.50, 100,50)
@@ -335,9 +346,12 @@ export function initDatabase() {
     CREATE TABLE IF NOT EXISTS categories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
-      sort_order INTEGER DEFAULT 0
+      sort_order INTEGER DEFAULT 0,
+      emoji TEXT DEFAULT '📁'
     );
   `);
+
+  safeAddColumn('categories', "emoji TEXT DEFAULT '📁'");
 
   // 1. Таблица товаров (чистая витрина, наполняется ТОЛЬКО через /admin)
   db.exec(`
@@ -371,6 +385,13 @@ export function initDatabase() {
   `);
 
   // Безопасное автоматическое добавление колонок custom_products (автомиграция)
+  safeAddColumn('custom_products', "emoji TEXT DEFAULT '📦'");
+  safeAddColumn('custom_products', "currency_symbol TEXT DEFAULT '₽'");
+  safeAddColumn('custom_products', "exchange_rate REAL DEFAULT 1.0");
+  safeAddColumn('custom_products', "fee_type TEXT DEFAULT 'PERCENT'");
+  safeAddColumn('custom_products', "fee_value REAL DEFAULT 0");
+  safeAddColumn('custom_products', "is_hidden INTEGER DEFAULT 0");
+
   addColumnIfNotExists('custom_products', 'emoji', "TEXT DEFAULT '📦'");
   addColumnIfNotExists('custom_products', 'currency_symbol', "TEXT DEFAULT '₽'");
   addColumnIfNotExists('custom_products', 'exchange_rate', 'REAL DEFAULT 1.0');
@@ -388,6 +409,18 @@ export function initDatabase() {
   addColumnIfNotExists('custom_products', 'is_hidden', 'INTEGER DEFAULT 0');
   addColumnIfNotExists('custom_products', 'fee_percent', 'REAL DEFAULT 0');
   addColumnIfNotExists('custom_products', 'fee_fixed', 'REAL DEFAULT 0');
+
+  // Очистка некорректных категорий [object Object]
+  try {
+    db.prepare("DELETE FROM categories WHERE name = '[object Object]'").run();
+  } catch (e) {}
+
+  // Предустановленные категории магазина
+  try {
+    seedDefaultCategories();
+  } catch (seedErr) {
+    console.warn('[DB WARNING] Не удалось засеять категории:', seedErr.message);
+  }
 
   // Миграция старых комиссий в новую схему fee_type и fee_value
   try {
@@ -968,17 +1001,9 @@ export function toggleProductDeliveryType(productId) {
  * Переключить видимость товара (скрыть / показать на витрине)
  */
 export function toggleProductVisibility(productId) {
-  const product = getProductById(productId);
-  if (!product) return null;
-
-  const newHidden = product.is_hidden ? 0 : 1;
-  db.prepare(`
-    UPDATE custom_products 
-    SET is_hidden = ? 
-    WHERE id = ?
-  `).run(newHidden, Number(productId));
-
-  return getProductById(productId);
+  const id = Number(productId);
+  db.prepare('UPDATE custom_products SET is_hidden = CASE WHEN is_hidden = 1 THEN 0 ELSE 1 END WHERE id = ?').run(id);
+  return getProductById(id);
 }
 
 /**
@@ -1974,17 +1999,103 @@ export function validatePromocode(code, userId, productId, orderAmount) {
 // КАТЕГОРИИ (CATEGORIES) И ПОИСК ТОВАРОВ
 // ==========================================
 
+export const DEFAULT_SHOP_CATEGORIES = [
+  { name: 'App Store & iTunes', emoji: '🍏', sort_order: 1 },
+  { name: 'Arena Breakout (Mobile)', emoji: '🪖', sort_order: 2 },
+  { name: 'Arena Breakout: Infinite (PC)', emoji: '🖥', sort_order: 3 },
+  { name: 'Arknights: Endfield', emoji: '🐺', sort_order: 4 },
+  { name: 'Brawl Stars', emoji: '💀', sort_order: 5 },
+  { name: 'ChatGPT', emoji: '🤖', sort_order: 6 },
+  { name: 'Clash of Clans', emoji: '⚔️', sort_order: 7 },
+  { name: 'Clash Royale', emoji: '👑', sort_order: 8 },
+  { name: 'Claude', emoji: '☀️', sort_order: 9 },
+  { name: 'Cookie Run: OvenBreak', emoji: '🍪', sort_order: 10 },
+  { name: 'CookieRun: Crumble', emoji: '🧁', sort_order: 11 },
+  { name: 'CookieRun: Kingdom', emoji: '🏰', sort_order: 12 },
+  { name: 'CookieRun: OvenSmash', emoji: '🍧', sort_order: 13 },
+  { name: 'Exit Lag', emoji: '⚡', sort_order: 14 },
+  { name: 'Figma', emoji: '🎨', sort_order: 15 },
+  { name: 'Fortnite', emoji: '🪂', sort_order: 16 },
+  { name: 'Free Fire', emoji: '🔥', sort_order: 17 },
+  { name: 'Gemini', emoji: '✨', sort_order: 18 },
+  { name: 'Genshin Impact', emoji: '🧚', sort_order: 19 },
+  { name: 'Goddess of Victory: NIKKE', emoji: '🔫', sort_order: 20 },
+  { name: 'Honkai Star Rail', emoji: '🚂', sort_order: 21 },
+  { name: 'Identity V', emoji: '🎭', sort_order: 22 },
+  { name: 'Love and Deepspace', emoji: '💫', sort_order: 23 },
+  { name: 'Marvel Rivals', emoji: '🦸', sort_order: 24 },
+  { name: 'Minecraft', emoji: '⛏', sort_order: 25 },
+  { name: 'Mobile Legends', emoji: '🛡', sort_order: 26 },
+  { name: 'Neverness to Everness', emoji: '🌆', sort_order: 27 },
+  { name: 'Playstation', emoji: '🎮', sort_order: 28 },
+  { name: 'PUBG (PC)', emoji: '🪖', sort_order: 29 },
+  { name: 'PUBG MOBILE', emoji: '📱', sort_order: 30 },
+  { name: 'Roblox', emoji: '🧱', sort_order: 31 },
+  { name: 'Spotify', emoji: '🎵', sort_order: 32 },
+  { name: 'Steam', emoji: '💨', sort_order: 33 },
+  { name: 'Telegram', emoji: '✈️', sort_order: 34 },
+  { name: 'Valorant', emoji: '🎯', sort_order: 35 },
+  { name: 'Wuthering Waves', emoji: '🌊', sort_order: 36 },
+  { name: 'Zenless Zone Zero', emoji: '⚡', sort_order: 37 },
+  { name: 'Zepeto', emoji: '👥', sort_order: 38 },
+  { name: 'Прочие игры', emoji: '🕹', sort_order: 39 },
+];
+
+/**
+ * Инициализация предустановленных категорий магазина
+ */
+export function seedDefaultCategories() {
+  safeAddColumn('categories', "emoji TEXT DEFAULT '📁'");
+
+  const insertStmt = db.prepare(`
+    INSERT INTO categories (name, sort_order, emoji)
+    VALUES (?, ?, ?)
+  `);
+  const updateStmt = db.prepare(`
+    UPDATE categories SET emoji = ?, sort_order = ? WHERE id = ?
+  `);
+
+  const existingCategories = db.prepare(`SELECT id, name, emoji FROM categories`).all();
+  const existingMap = new Map();
+  for (const c of existingCategories) {
+    if (c.name && c.name !== '[object Object]') {
+      existingMap.set(c.name.trim().toLowerCase(), c);
+    }
+  }
+
+  for (const cat of DEFAULT_SHOP_CATEGORIES) {
+    const key = cat.name.trim().toLowerCase();
+    const existing = existingMap.get(key);
+    if (!existing) {
+      insertStmt.run(cat.name, cat.sort_order, cat.emoji);
+    } else {
+      updateStmt.run(cat.emoji, cat.sort_order, existing.id);
+    }
+  }
+}
+
 /**
  * Создать категорию
  */
-export function createCategory(name, sortOrder = 0) {
-  const cleanName = String(name || '').trim();
-  if (!cleanName) throw new Error('Название категории не может быть пустым');
+export function createCategory(nameOrObj, sortOrder = 0, emoji = '📁') {
+  let cleanName = '';
+  let cleanSort = sortOrder;
+  let cleanEmoji = emoji;
+  if (nameOrObj && typeof nameOrObj === 'object') {
+    cleanName = String(nameOrObj.name || '').trim();
+    cleanSort = nameOrObj.sort_order !== undefined ? nameOrObj.sort_order : sortOrder;
+    cleanEmoji = nameOrObj.emoji || emoji;
+  } else {
+    cleanName = String(nameOrObj || '').trim();
+  }
+  if (!cleanName || cleanName === '[object Object]') {
+    throw new Error('Название категории не может быть пустым');
+  }
   const stmt = db.prepare(`
-    INSERT INTO categories (name, sort_order)
-    VALUES (?, ?)
+    INSERT INTO categories (name, sort_order, emoji)
+    VALUES (?, ?, ?)
   `);
-  const res = stmt.run(cleanName, Number(sortOrder) || 0);
+  const res = stmt.run(cleanName, Number(cleanSort) || 0, cleanEmoji || '📁');
   return getCategoryById(res.lastInsertRowid);
 }
 
@@ -2012,17 +2123,18 @@ export function getAllCategories() {
 /**
  * Обновить название и/или порядок сортировки категории
  */
-export function updateCategory(id, { name, sort_order }) {
+export function updateCategory(id, { name, sort_order, emoji }) {
   const category = getCategoryById(id);
   if (!category) return null;
   const nextName = name !== undefined ? String(name).trim() : category.name;
   const nextSort = sort_order !== undefined ? Number(sort_order) : category.sort_order;
+  const nextEmoji = emoji !== undefined ? String(emoji).trim() : (category.emoji || '📁');
 
   db.prepare(`
     UPDATE categories
-    SET name = ?, sort_order = ?
+    SET name = ?, sort_order = ?, emoji = ?
     WHERE id = ?
-  `).run(nextName, nextSort, Number(id));
+  `).run(nextName, nextSort, nextEmoji, Number(id));
 
   return getCategoryById(id);
 }
@@ -2210,6 +2322,9 @@ export const setProductCategory = updateProductCategory;
 
 export default {
   db,
+  prepare: (sql) => db.prepare(sql),
+  exec: (sql) => db.exec(sql),
+  pragma: (sql) => db.pragma(sql),
   initDatabase,
   addColumnIfNotExists,
   safeAddColumn,
@@ -2293,4 +2408,7 @@ export default {
   getUsersCount,
   markUserBlocked,
   markUserActive,
+  calculateFlexiblePrice,
+  DEFAULT_SHOP_CATEGORIES,
+  seedDefaultCategories,
 };
