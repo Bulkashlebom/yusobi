@@ -1,3 +1,4 @@
+import './config.js';
 /**
  * db.js - Локальная база данных SQLite для магазина цифровых товаров
  * Использует better-sqlite3 для высокой надежности и синхронного выполнения запросов.
@@ -38,16 +39,15 @@ if (!fs.existsSync(DB_DIR)) {
 }
 
 // Приоритетное имя файла базы shop.db (с авто-миграцией старого shop.sqlite при наличии)
-const dbPath = path.join(DB_DIR, 'shop.db');
+const newDbPath = path.join(DB_DIR, 'shop.db');
 const legacyDbPath = path.join(__dirname, 'shop.sqlite');
-
-if (!fs.existsSync(dbPath) && fs.existsSync(legacyDbPath)) {
-  try {
-    fs.copyFileSync(legacyDbPath, dbPath);
-    console.log(`[DB MIGRATION] Существующая база данных успешно скопирована из ${legacyDbPath} в ${dbPath}`);
-  } catch (err) {
-    console.warn(`[DB MIGRATION WARNING] Не удалось перенести ${legacyDbPath}:`, err.message);
-  }
+// Open the legacy database in place so SQLite can recover its WAL. Copying only
+// the main file can lose committed payments and stock changes still in the WAL.
+const dbPath = fs.existsSync(newDbPath) ? newDbPath
+  : fs.existsSync(legacyDbPath) ? legacyDbPath : newDbPath;
+if (!fs.existsSync(dbPath) &&
+    [newDbPath, legacyDbPath].some(candidate => fs.existsSync(candidate + '-wal'))) {
+  throw new Error('SQLite WAL found without the main database. Restore a consistent backup before starting the store.');
 }
 
 console.log(`[DB] Подключение к постоянной базе данных по пути: ${dbPath}`);
@@ -573,9 +573,6 @@ export function initDatabase() {
     // Игнорируем авто-синхронизацию при старте
   }
 }
-
-// Запуск инициализации при импорте
-initDatabase();
 
 // ==========================================
 // ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ОСТАТКА
@@ -2319,6 +2316,9 @@ export const markCustomProductSold = markProductSold;
 export const deleteCustomProduct = deleteProduct;
 export const createCustomProduct = createProduct;
 export const setProductCategory = updateProductCategory;
+
+// Constants (including category seeds) must be initialized before migrations.
+initDatabase();
 
 export default {
   db,
