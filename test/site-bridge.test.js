@@ -37,3 +37,28 @@ test('customer update is sent only after Telegram opt-in', async () => {
     ]})});
   await bridge.sync(); assert.equal(sent.length,1);assert.equal(sent[0][0],'123');assert.match(sent[0][1],/answer/);database.close();
 });
+
+test('website owner actions reject other users and owner replies bypass unrelated shop text states', async () => {
+  const database=new Database(':memory:');const handlers={},calls=[],messages=[];
+  const bridge=new SiteBridge({url:'https://example.org',key:'secret',database,telegram:{},adminIds:()=>['42'],isAdmin:id=>id===42});
+  const fakeBot={start:fn=>handlers.start=fn,command:()=>{},action:(pattern,fn)=>handlers.action=fn,use:fn=>handlers.text=fn};
+  bridge.call=async(path,payload)=>{calls.push(payload);return {ok:true,state:'offer_ready'}};
+  bridge.register(fakeBot);
+  const id='00000000-0000-0000-0000-000000000001';
+  const context={from:{id:7},chat:{type:'private'},match:['','reply',id],answerCbQuery:async()=>{},reply:async text=>messages.push(text)};
+  await handlers.action(context);assert.equal(bridge.pendingReply.size,0);assert.equal(calls.length,0);
+  context.from.id=42;await handlers.action(context);assert.equal(bridge.pendingReply.size,1);
+  let next=false;context.message={text:'Reply from owner'};await handlers.text(context,()=>{next=true});
+  assert.equal(next,false);assert.deepEqual(calls,[{action:'reply',id,reply:'Reply from owner'}]);assert.equal(bridge.pendingReply.size,0);
+  database.close();
+});
+test('Telegram linking requires a private chat and uses the actual sender ID', async () => {
+  const database=new Database(':memory:');const handlers={},calls=[];
+  const bridge=new SiteBridge({url:'https://example.org',key:'secret',database,telegram:{},adminIds:()=>['42'],isAdmin:()=>false});
+  bridge.call=async(path,payload)=>{calls.push(payload);return {request:{id:'request',reference:'TEST',state:'new'}}};
+  bridge.register({start:fn=>handlers.start=fn,command:()=>{},action:()=>{},use:()=>{}});
+  const context={from:{id:123},chat:{type:'group'},startPayload:'site_'+'a'.repeat(32),reply:async()=>{}};
+  await handlers.start(context,()=>{});assert.equal(calls.length,0);
+  context.chat.type='private';await handlers.start(context,()=>{});
+  assert.deepEqual(calls,[{action:'link',token:'a'.repeat(32),telegramUserId:'123'}]);database.close();
+});
