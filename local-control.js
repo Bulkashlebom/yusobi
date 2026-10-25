@@ -31,7 +31,7 @@ function openLocalPage(url) {
 function log(text) {
   let safe = String(text);
   const cfg = readEnv();
-  for (const key of ['BOT_TOKEN', 'AVIEDO_TOKEN', 'AVIEDO_SECRET', 'OWNER_SETUP_SECRET']) {
+  for (const key of ['BOT_TOKEN', 'AVIEDO_TOKEN', 'AVIEDO_SECRET', 'OWNER_SETUP_SECRET', 'SHOP_BRIDGE_KEY']) {
     if (cfg[key]) safe = safe.split(cfg[key]).join('[REDACTED]');
   }
   safe = safe.replace(/bot\d{5,}:[A-Za-z0-9_-]+/g, 'bot[REDACTED]');

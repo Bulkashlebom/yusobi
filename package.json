@@ -10,7 +10,7 @@
     "start": "node bot-entry.js",
     "start:local": "node local-control.js --open",
     "build": "npm run check",
-    "check": "node --check bot-entry.js && node --check bot.js && node --check db.js && node --check wizard.js && node --check runtime.js && node --check supplier.js && node --check supplier-commands.js && node --check catalog.js && node --check local-control.js && node --check owner-setup.js && node --check env-file.js",
+    "check": "node --check bot-entry.js && node --check bot.js && node --check db.js && node --check wizard.js && node --check runtime.js && node --check supplier.js && node --check supplier-commands.js && node --check catalog.js && node --check local-control.js && node --check owner-setup.js && node --check env-file.js && node --check site-bridge.js",
     "test": "node --test test/*.test.js",
     "doctor": "node scripts/doctor.js",
     "supplier:check": "node scripts/supplier-check.js"

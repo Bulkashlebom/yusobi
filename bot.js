@@ -4,6 +4,7 @@ import { safeError } from './config.js';
 import { registerSupplierCommands } from './supplier-commands.js';
 import { pathToFileURL } from 'node:url';
 import { registerOwnerSetup } from './owner-setup.js';
+import { SiteBridge } from './site-bridge.js';
 
 import { Telegraf, Markup, session } from 'telegraf';
 import fs from 'fs';
@@ -136,7 +137,7 @@ export async function safeEditMessage(ctx, htmlText, extra = {}) {
  */
 export function getMainMenuKeyboard(userId) {
   const buttons = [
-    [Markup.button.callback('📦 Каталог товаров', 'menu_catalog')],
+    [process.env.SHOP_SITE_URL ? Markup.button.url('📦 Каталог товаров', process.env.SHOP_SITE_URL) : Markup.button.callback('📦 Каталог товаров', 'menu_catalog')],
     [
       Markup.button.callback('🛍 Мои покупки', 'menu_my_orders'),
       Markup.button.callback('💬 Поддержка', 'menu_support'),
@@ -252,6 +253,20 @@ registerOwnerSetup(bot, { getAdminIds, onConnected: () => {
   SUPPORT_CONTACT = process.env.SUPPORT_CONTACT || SUPPORT_CONTACT;
 } });
 
+export const siteBridge = new SiteBridge({ url: process.env.SHOP_SITE_URL, key: process.env.SHOP_BRIDGE_KEY,
+  database: db.db, telegram: bot.telegram, adminIds: getAdminIds, isAdmin });
+siteBridge.register(bot);
+
+// In storefront mode Telegram only handles notifications and support.
+bot.use(async (ctx, next) => {
+  if (!process.env.SHOP_SITE_URL) return next();
+  const data = ctx.callbackQuery?.data || '';
+  if (/^(menu_catalog$|catalog$|cat_view_|cat_page_|catalog_search$|search_page_|view_prod_|qty_|buy_|skip_comment|enter_promocode$|copy_payment_details)/.test(data)) {
+    return ctx.reply('Выбор товара и оформление заявки доступны на сайте. Итоговую цену и оплату согласуем до покупки.', Markup.inlineKeyboard([[Markup.button.url('Открыть каталог', process.env.SHOP_SITE_URL)]]));
+  }
+  return next();
+});
+
 bot.start(async (ctx) => {
   const userId = ctx.from.id;
   const username = ctx.from.username ? `@${ctx.from.username}` : null;
@@ -272,13 +287,9 @@ bot.start(async (ctx) => {
   }
   userStates.delete(userId);
 
-  const welcomeText =
-    `👋 <b>Добро пожаловать в наш магазин цифровых товаров!</b>\n\n` +
-    `Здесь вы можете приобрести проверенные цифровые товары, ключи, подписки и готовые аккаунты с гарантией.\n\n` +
-    `⚡ <b>Автовыдача</b> — моментальная выдача данных сразу после подтверждения чека\n` +
-    `✍️ <b>Ручная выдача</b> — индивидуальное оформление администратором\n` +
-    `💳 <b>Пополнение баланса</b> — гибкое зачисление средств на ваш аккаунт по логину\n\n` +
-    `Выберите раздел в меню ниже 👇`;
+  const welcomeText = process.env.SHOP_SITE_URL
+    ? '👋 <b>Ysobi Shop</b>\n\nПодписки, цифровые товары и игровые пополнения.\n\nКаталог и заявки доступны на сайте. Сначала согласуем наличие, цену и способ оплаты. Здесь можно получать уведомления по своей заявке и связаться с поддержкой.'
+    : '👋 <b>Ysobi Shop</b>\n\nПоможем выбрать цифровой товар и уточнить условия покупки. Связь с продавцом — через кнопку поддержки.';
 
   await safeSendMessage(ctx.telegram, userId, welcomeText, getMainMenuKeyboard(userId));
 });
@@ -5065,10 +5076,10 @@ const checkpointInterval = setInterval(() => {
 checkpointInterval.unref();
 maintenanceTimers.push(checkpointInterval);
 
-export function startBot() { return runtime.start(); }
-export function stopBot(reason) {
+export function startBot() { siteBridge.start(); return runtime.start(); }
+export async function stopBot(reason) {
   for (const timer of maintenanceTimers) clearInterval(timer);
-  return runtime.stop(reason);
+  await Promise.all([siteBridge.stop(), runtime.stop(reason)]);
 }
 export const launchBot = startBot;
 export const initApp = startBot;
