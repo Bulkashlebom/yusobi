@@ -1,76 +1,14 @@
-process.on('uncaughtException', (err) => {
-  console.error('[CRITICAL PREVENTED] Uncaught Exception:', err);
-  process.exitCode = 0;
-});
-process.on('unhandledRejection', (reason) => {
-  console.error('[CRITICAL PREVENTED] Unhandled Rejection:', reason);
-  process.exitCode = 0;
-});
-process.on('warning', (warning) => {
-  if (warning.name !== 'ExperimentalWarning') {
-    console.warn('[NODE WARNING]', warning.message);
-  }
-});
-
-/**
- * bot.js - Основной файл Telegram-бота магазина цифровых товаров на Telegraf
- * Работает ИСКЛЮЧИТЕЛЬНО на собственных товарах администратора из локальной БД SQLite.
- */
-
-import http from 'http';
-import https from 'https';
-
-// Keep-Alive HTTP сервер и самопинг для поддержания работы 24/7 (Anti-Sleep Guard)
-const PORT = process.env.PORT || 3000;
-let healthServer = null;
-
-try {
-  healthServer = http.createServer((req, res) => {
-    if (req.url === '/health' || req.url === '/status') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({
-        status: 'ok',
-        uptime: Math.floor(process.uptime()),
-        timestamp: new Date().toISOString(),
-      }));
-    }
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('OK');
-  });
-
-  healthServer.on('error', (err) => {
-    if (err && err.code === 'EADDRINUSE') {
-      // Порт уже слушается основным Express-сервером
-    } else {
-      console.error('[HTTP ERROR]', err);
-    }
-  });
-
-  healthServer.listen(PORT, '0.0.0.0', () => {
-    console.log(`[HTTP] Сервер на порту ${PORT}`);
-  });
-} catch (e) {}
-
-// Функция самопинга каждые 3 минуты (локально + публичный URL при наличии)
-function pingKeepAlive() {
-  http.get(`http://127.0.0.1:${PORT}/health`, () => {}).on('error', () => {});
-
-  const publicUrl = process.env.APP_URL || process.env.RENDER_EXTERNAL_URL || process.env.RAILWAY_STATIC_URL || process.env.PUBLIC_URL;
-  if (publicUrl) {
-    try {
-      const targetUrl = publicUrl.startsWith('http') ? publicUrl : `https://${publicUrl}`;
-      const client = targetUrl.startsWith('https') ? https : http;
-      client.get(targetUrl, () => {}).on('error', () => {});
-    } catch (e) {}
-  }
-}
-
-setInterval(pingKeepAlive, 3 * 60 * 1000);
+import './config.js';
+import { BotRuntime } from './runtime.js';
+import { safeError } from './config.js';
+import { registerSupplierCommands } from './supplier-commands.js';
+import { pathToFileURL } from 'node:url';
+import { registerOwnerSetup } from './owner-setup.js';
+import { SiteBridge } from './site-bridge.js';
 
 import { Telegraf, Markup, session } from 'telegraf';
 import fs from 'fs';
 import path from 'path';
-import dotenv from 'dotenv';
 import db, {
   parseMoney,
   formatMoney,
@@ -87,18 +25,17 @@ import wizard, {
   saveCreatedProduct,
 } from './wizard.js';
 
-dotenv.config();
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const PAYMENT_DETAILS = process.env.PAYMENT_DETAILS || '▫️ Ozon Bank: 2204 2402 6074 8860\n▫️ Альфа-Банк / СБП: +7 (900) 123-45-67';
-const SUPPORT_CONTACT = process.env.SUPPORT_CONTACT || '@l_dont_understand';
+const PAYMENT_DETAILS = process.env.PAYMENT_DETAILS || 'Актуальные условия оплаты уточняйте у поддержки.';
+let SUPPORT_CONTACT = process.env.SUPPORT_CONTACT || '@l_dont_understand';
 
 if (!BOT_TOKEN) {
   console.warn('[BOT WARNING] Переменная BOT_TOKEN не указана в .env файле.');
 }
 
 export const bot = new Telegraf(process.env.BOT_TOKEN || BOT_TOKEN || 'DUMMY_TOKEN_NOT_CONFIGURED', {
-  handlerTimeout: 600000, // 10 минут
+  handlerTimeout: 90000, // Bound handler time; supplier work must use a persistent queue.
 });
 
 // Сессия Telegraf для хранения временных черновиков заказов
@@ -200,7 +137,7 @@ export async function safeEditMessage(ctx, htmlText, extra = {}) {
  */
 export function getMainMenuKeyboard(userId) {
   const buttons = [
-    [Markup.button.callback('📦 Каталог товаров', 'menu_catalog')],
+    [process.env.SHOP_SITE_URL ? Markup.button.url('📦 Каталог товаров', process.env.SHOP_SITE_URL) : Markup.button.callback('📦 Каталог товаров', 'menu_catalog')],
     [
       Markup.button.callback('🛍 Мои покупки', 'menu_my_orders'),
       Markup.button.callback('💬 Поддержка', 'menu_support'),
@@ -281,7 +218,7 @@ bot.use(async (ctx, next) => {
 // ==========================================
 // ФОНОВЫЙ ТАЙМЕР: АВТО-ОТМЕНА ЗАКАЗОВ ПО ТАЙМАУТУ 20 МИН
 // ==========================================
-setInterval(async () => {
+const expiryInterval = setInterval(async () => {
   try {
     const expired = db.cancelExpiredOrders(20);
     if (expired && expired.length > 0) {
@@ -305,10 +242,30 @@ setInterval(async () => {
     console.error('[CRON ERROR] Ошибка при авто-отмене заказов:', err);
   }
 }, 60 * 1000);
+expiryInterval.unref();
 
 // ==========================================
 // КОМАНДЫ БОТА
 // ==========================================
+
+registerSupplierCommands(bot, { isAdmin, escapeHtml });
+registerOwnerSetup(bot, { getAdminIds, onConnected: () => {
+  SUPPORT_CONTACT = process.env.SUPPORT_CONTACT || SUPPORT_CONTACT;
+} });
+
+export const siteBridge = new SiteBridge({ url: process.env.SHOP_SITE_URL, key: process.env.SHOP_BRIDGE_KEY,
+  database: db.db, telegram: bot.telegram, adminIds: getAdminIds, isAdmin });
+siteBridge.register(bot);
+
+// In storefront mode Telegram only handles notifications and support.
+bot.use(async (ctx, next) => {
+  if (!process.env.SHOP_SITE_URL) return next();
+  const data = ctx.callbackQuery?.data || '';
+  if (/^(menu_catalog$|catalog$|cat_view_|cat_page_|catalog_search$|search_page_|view_prod_|qty_|buy_|skip_comment|enter_promocode$|copy_payment_details)/.test(data)) {
+    return ctx.reply('Выбор товара и оформление заявки доступны на сайте. Итоговую цену и оплату согласуем до покупки.', Markup.inlineKeyboard([[Markup.button.url('Открыть каталог', process.env.SHOP_SITE_URL)]]));
+  }
+  return next();
+});
 
 bot.start(async (ctx) => {
   const userId = ctx.from.id;
@@ -330,13 +287,9 @@ bot.start(async (ctx) => {
   }
   userStates.delete(userId);
 
-  const welcomeText =
-    `👋 <b>Добро пожаловать в наш магазин цифровых товаров!</b>\n\n` +
-    `Здесь вы можете приобрести проверенные цифровые товары, ключи, подписки и готовые аккаунты с гарантией.\n\n` +
-    `⚡ <b>Автовыдача</b> — моментальная выдача данных сразу после подтверждения чека\n` +
-    `✍️ <b>Ручная выдача</b> — индивидуальное оформление администратором\n` +
-    `💳 <b>Пополнение баланса</b> — гибкое зачисление средств на ваш аккаунт по логину\n\n` +
-    `Выберите раздел в меню ниже 👇`;
+  const welcomeText = process.env.SHOP_SITE_URL
+    ? '👋 <b>Ysobi Shop</b>\n\nПодписки, цифровые товары и игровые пополнения.\n\nКаталог и заявки доступны на сайте. Сначала согласуем наличие, цену и способ оплаты. Здесь можно получать уведомления по своей заявке и связаться с поддержкой.'
+    : '👋 <b>Ysobi Shop</b>\n\nПоможем выбрать цифровой товар и уточнить условия покупки. Связь с продавцом — через кнопку поддержки.';
 
   await safeSendMessage(ctx.telegram, userId, welcomeText, getMainMenuKeyboard(userId));
 });
@@ -5042,7 +4995,7 @@ bot.on('text', async (ctx) => {
 
 // Глобальный перехват ошибок Telegraf (Crash Protection & Anti-Spam Loop)
 bot.catch(async (err, ctx) => {
-  const msg = err?.message || err?.description || String(err);
+  const msg = safeError(err);
 
   // При конфликте 409 инициируем мягкий перезапуск polling
   if (msg.includes('409') || msg.includes('Conflict')) {
@@ -5070,7 +5023,7 @@ bot.catch(async (err, ctx) => {
     console.error('[TG SILENT NETWORK ERROR]', msg);
     return;
   }
-  console.error('[BOT ERROR]', err);
+  console.error('[BOT ERROR]', safeError(err));
 
   // 1. Мягкое уведомление пользователю (безопасно, без риска повторного падения)
   try {
@@ -5104,165 +5057,40 @@ bot.catch(async (err, ctx) => {
   }
 });
 
-// Глобальная защита процесса от падения (Node.js Process Protections)
-process.on('uncaughtException', (err) => {
-  if (err && err.code === 'EADDRINUSE') {
-    console.warn('[PROCESS WARNING] Порт уже занят (EADDRINUSE). Работа продолжается.');
-    return;
+// One lifecycle shared by the bot-only and optional web entry points.
+export const runtime = new BotRuntime(bot, { token: BOT_TOKEN });
+
+const maintenanceTimers = [expiryInterval];
+const cleanupInterval = setInterval(() => {
+  const now = Date.now();
+  for (const [id, state] of userStates) {
+    if (state?.createdAt && now - state.createdAt > 86400000) userStates.delete(id);
   }
-  console.error('[CRITICAL PROCESS ERROR] uncaughtException (перехвачено):', err);
-  try {
-    const adminIds = getAdminIds();
-    const token = BOT_TOKEN;
-    if (token && token !== 'DUMMY_TOKEN_NOT_CONFIGURED' && adminIds.length > 0) {
-      const stackSnippet = (err?.stack || String(err)).slice(0, 3000);
-      const crashAlert =
-        `💥 <b>КРИТИЧЕСКИЙ СБОЙ ПРОЦЕССА (uncaughtException)!</b>\n\n` +
-        `<b>Ошибка:</b> <code>${escapeHtml(err?.message || 'Unknown')}</code>\n\n` +
-        `<pre>${escapeHtml(stackSnippet)}</pre>`;
+}, 3600000);
+cleanupInterval.unref();
+maintenanceTimers.push(cleanupInterval);
+const checkpointInterval = setInterval(() => {
+  try { db.pragma('wal_checkpoint(PASSIVE)'); }
+  catch (error) { console.warn('[DB CHECKPOINT]', safeError(error)); }
+}, 1800000);
+checkpointInterval.unref();
+maintenanceTimers.push(checkpointInterval);
 
-      for (const aId of adminIds) {
-        safeSendMessage(bot.telegram, aId, crashAlert).catch(() => {});
-      }
-    }
-  } catch (e) {}
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('[CRITICAL PROCESS PROMISE] unhandledRejection (перехвачено):', reason);
-  try {
-    const adminIds = getAdminIds();
-    const token = BOT_TOKEN;
-    if (token && token !== 'DUMMY_TOKEN_NOT_CONFIGURED' && adminIds.length > 0) {
-      const reasonMsg = reason?.message || String(reason) || 'Unknown reason';
-      const stackSnippet = (reason?.stack || String(reason)).slice(0, 3000);
-      const rejAlert =
-        `⚠️ <b>НЕОБРАБОТАННЫЙ ПРОМИС (unhandledRejection)!</b>\n\n` +
-        `<b>Причина:</b> <code>${escapeHtml(reasonMsg)}</code>\n\n` +
-        `<pre>${escapeHtml(stackSnippet)}</pre>`;
-
-      for (const aId of adminIds) {
-        safeSendMessage(bot.telegram, aId, rejAlert).catch(() => {});
-      }
-    }
-  } catch (e) {}
-});
-
-let isBotConnected = false;
-let isBotLaunching = false;
-let consecutiveFailures = 0;
-let watchdogInterval = null;
-
-// Фоновый мониторинг связи с Telegram API (Watchdog) для поддержания вечной работы 24/7
-function startWatchdog() {
-  if (watchdogInterval) return;
-
-  watchdogInterval = setInterval(async () => {
-    if (!isBotConnected || !BOT_TOKEN || BOT_TOKEN === 'DUMMY_TOKEN_NOT_CONFIGURED') {
-      return;
-    }
-
-    try {
-      await bot.telegram.getMe();
-      consecutiveFailures = 0;
-    } catch (err) {
-      consecutiveFailures++;
-      const msg = err?.message || String(err);
-      console.warn(`[WATCHDOG] Сбой связи с Telegram API (${consecutiveFailures}/3):`, msg);
-
-      // Если 3 проверки подряд завершились неудачей — мягко перезапускаем polling
-      if (consecutiveFailures >= 3) {
-        console.error('[WATCHDOG] Связь с Telegram потеряна! Принудительный перезапуск polling...');
-        consecutiveFailures = 0;
-        try {
-          bot.stop();
-        } catch (e) {}
-      }
-    }
-  }, 45 * 1000); // каждые 45 секунд
+export function startBot() { siteBridge.start(); return runtime.start(); }
+export async function stopBot(reason) {
+  for (const timer of maintenanceTimers) clearInterval(timer);
+  await Promise.all([siteBridge.stop(), runtime.stop(reason)]);
 }
-
-// 24/7 Periodic Maintenance: очистка устаревших FSM-состояний и пассивный сброс WAL
-setInterval(() => {
-  try {
-    const now = Date.now();
-    for (const [userId, state] of userStates.entries()) {
-      if (state && state.createdAt && (now - state.createdAt > 24 * 60 * 60 * 1000)) {
-        userStates.delete(userId);
-      }
-    }
-  } catch (e) {}
-}, 60 * 60 * 1000); // раз в час
-
-setInterval(() => {
-  try {
-    if (db && db.pragma) {
-      db.pragma('wal_checkpoint(PASSIVE)');
-    }
-  } catch (e) {}
-}, 30 * 60 * 1000); // каждые 30 минут
-
-// 3. Плавная остановка (Graceful Shutdown)
-process.once('SIGINT', () => {
-  if (healthServer) {
-    try { healthServer.close(); } catch (e) {}
-  }
-  try { bot.stop('SIGINT'); } catch (e) {}
-});
-
-process.once('SIGTERM', () => {
-  if (healthServer) {
-    try { healthServer.close(); } catch (e) {}
-  }
-  try { bot.stop('SIGTERM'); } catch (e) {}
-});
-
-// Вечный цикл запуска с переподключением Polling (24/7):
-export async function startBot() {
-  if (isBotLaunching) return;
-  isBotLaunching = true;
-
-  if (!BOT_TOKEN || BOT_TOKEN === 'DUMMY_TOKEN_NOT_CONFIGURED') {
-    console.log('[BOT INFO] Telegram-бот не запущен (укажите BOT_TOKEN в .env)');
-    return;
-  }
-
-  // Запуск фонового мониторинга здоровья соединения
-  startWatchdog();
-
-  while (true) {
-    try {
-      console.log('[BOT] Запуск polling...');
-      await bot.telegram.deleteWebhook({ drop_pending_updates: true }).catch(() => {});
-      await bot.launch({
-        dropPendingUpdates: true,
-      });
-      isBotConnected = true;
-      consecutiveFailures = 0;
-      console.log('✅ [BOT] Бот успешно подключен и готов к работе 24/7');
-      await new Promise((resolve) => bot.once('stop', resolve));
-      console.log('[BOT] Polling остановлен, инициируется повторное подключение...');
-    } catch (err) {
-      isBotConnected = false;
-      const errMsg = err?.message || String(err);
-      console.error('[BOT ERROR]', errMsg);
-
-      if (errMsg.includes('409') || errMsg.includes('Conflict')) {
-        console.log('[BOT] Конфликт 409: пауза 10 сек перед повторной очисткой вебхука...');
-        await new Promise((r) => setTimeout(r, 10000));
-        await bot.telegram.deleteWebhook({ drop_pending_updates: true }).catch(() => {});
-      }
-    }
-
-    isBotConnected = false;
-    console.log('[BOT] Перезапуск через 5 сек...');
-    await new Promise((r) => setTimeout(r, 5000));
-  }
-}
-
-startBot();
-
 export const launchBot = startBot;
 export const initApp = startBot;
 export const startBotLoop = startBot;
 export default bot;
+
+// Railway may override package.json with the existing `node bot.js` command.
+// Defer this import until this module is evaluated to avoid an ESM import cycle.
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  void import('./bot-entry.js').catch(error => {
+    console.error('[STARTUP]', safeError(error));
+    process.exit(1);
+  });
+}
